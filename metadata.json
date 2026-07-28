@@ -1,0 +1,6 @@
+{
+  "name": "Multi-College Notice Tracker",
+  "description": "Automated notice scraping and Telegram notification system for National University colleges in Bangladesh",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
