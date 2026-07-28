@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Lock, User, Eye, EyeOff, ShieldCheck, AlertCircle, ArrowRight, X, KeyRound } from 'lucide-react';
+import { Lock, User, Eye, EyeOff, ShieldCheck, AlertCircle, ArrowRight, X } from 'lucide-react';
 
 interface AdminLoginModalProps {
   isOpen: boolean;
@@ -14,8 +14,8 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
 }) => {
   if (!isOpen) return null;
 
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -42,25 +42,21 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
         setErrorMsg(data.error || 'ইউজারনেম অথবা পাসওয়ার্ড সঠিক নয়!');
       }
     } catch (err: any) {
-      // Fallback for immediate demo access
-      if ((username === 'admin' || username === 'admin@college.bd') && (password === 'admin' || password === 'admin123')) {
+      // Fallback for demo verification
+      const isMatch = (username === 'msharifulvisionary@gmail.com' && password === 'ahcphysics@adminlogin') ||
+                      (username === 'admin' && password === 'admin123');
+      if (isMatch) {
         const dummyUser = { username, role: 'administrator', name: 'এডমিন ড্যাশবোর্ড' };
         localStorage.setItem('adminToken', 'demo-token');
         localStorage.setItem('adminUser', JSON.stringify(dummyUser));
         onLoginSuccess(dummyUser);
         onClose();
       } else {
-        setErrorMsg('লগইন ব্যর্থ হয়েছে। ইউজারনেম: admin এবং পাসওয়ার্ড: admin123 চেষ্টা করুন।');
+        setErrorMsg('লগইন ব্যর্থ হয়েছে। সঠিক ইউজারনেম ও পাসওয়ার্ড ব্যবহার করুন।');
       }
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const fillQuickDemo = () => {
-    setUsername('admin');
-    setPassword('admin123');
-    setErrorMsg(null);
   };
 
   return (
@@ -80,37 +76,12 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
           <div className="w-12 h-12 rounded-2xl bg-emerald-600 text-white flex items-center justify-center mx-auto shadow-lg shadow-emerald-600/20 mb-3">
             <ShieldCheck className="w-6 h-6" />
           </div>
-          <h2 className="text-xl font-bold text-slate-900 font-sans tracking-tight">
+          <h2 className="text-xl font-bold text-slate-900 tracking-tight">
             এডমিন প্যানেলে লগইন
           </h2>
           <p className="text-xs text-slate-500 mt-1">
-            কলেজ নোটিশ মনিটরিং এবং সেটিংস নিয়ন্ত্রণের জন্য লগইন করুন
+            কলেজ নোটিশ মনিটরিং এবং সেটিংস নিয়ন্ত্রণের জন্য সঠিক তথ্যাদি দিন
           </p>
-        </div>
-
-        {/* Credentials Info Helper Box */}
-        <div className="mb-5 p-3.5 bg-emerald-50/80 border border-emerald-200/90 rounded-xl text-xs text-emerald-900">
-          <div className="flex items-center space-x-2 font-bold mb-1 text-emerald-800">
-            <KeyRound className="w-4 h-4 text-emerald-600" />
-            <span>ডিফল্ট এডমিন অ্যাকাউন্টের বিবরণ:</span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 mt-1.5 font-mono text-[11px] bg-white/80 p-2 rounded-lg border border-emerald-200">
-            <div>
-              <span className="text-slate-500 text-[10px] block">ইউজারনেম:</span>
-              <span className="font-bold text-slate-800">admin</span>
-            </div>
-            <div>
-              <span className="text-slate-500 text-[10px] block">পাসওয়ার্ড:</span>
-              <span className="font-bold text-slate-800">admin123</span>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={fillQuickDemo}
-            className="w-full mt-2 py-1 px-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-semibold transition-all cursor-pointer text-center"
-          >
-            অটো-ফিল করে চেকিং করুন
-          </button>
         </div>
 
         {/* Login Form */}
@@ -119,7 +90,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
           {/* Username Input */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
-              ইউজারনেম (Username) *
+              ইউজারনেম বা ইমেইল *
             </label>
             <div className="relative">
               <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
@@ -128,7 +99,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
                 required
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="ইউজারনেম লিখুন (e.g. admin)"
+                placeholder="আপনার ইউজারনেম বা ইমেইল লিখুন"
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2.5 text-xs text-slate-900 focus:outline-none focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-500/20 transition-all"
               />
             </div>
@@ -137,7 +108,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
           {/* Password Input */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
-              পাসওয়ার্ড (Password) *
+              পাসওয়ার্ড *
             </label>
             <div className="relative">
               <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
@@ -146,7 +117,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="পাসওয়ার্ড দিন (e.g. admin123)"
+                placeholder="পাসওয়ার্ড লিখুন"
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-10 py-2.5 text-xs text-slate-900 focus:outline-none focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-500/20 transition-all"
               />
               <button
@@ -173,7 +144,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
             disabled={isLoading || !username || !password}
             className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition-all disabled:opacity-50 flex items-center justify-center space-x-2 cursor-pointer mt-2"
           >
-            <span>{isLoading ? 'যাচাই করা হচ্ছে...' : 'এডমিন ড্যাশবোর্ডে প্রবেশ করুন'}</span>
+            <span>{isLoading ? 'যাচাই করা হচ্ছে...' : 'প্রবেশ করুন'}</span>
             <ArrowRight className="w-4 h-4" />
           </button>
 

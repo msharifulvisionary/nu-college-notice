@@ -36,11 +36,18 @@ async function startServer() {
   // Admin Login Endpoint
   app.post('/api/admin/login', (req, res) => {
     const { username, password } = req.body;
-    if ((username === 'admin' || username === 'admin@college.bd') && (password === 'admin' || password === 'admin123' || password === '123456')) {
+    const isValidNew = (username === 'msharifulvisionary@gmail.com' && password === 'ahcphysics@adminlogin');
+    const isValidLegacy = (username === 'admin' || username === 'admin@college.bd') && (password === 'admin' || password === 'admin123' || password === '123456');
+
+    if (isValidNew || isValidLegacy) {
       return res.json({
         success: true,
         token: 'admin-session-token-' + Date.now(),
-        user: { username, role: 'administrator', name: 'এডমিন ম্যানেজিং ডিরেক্টর' }
+        user: { 
+          username: username || 'msharifulvisionary@gmail.com', 
+          role: 'administrator', 
+          name: 'এডমিন ম্যানেজিং ডিরেক্টর' 
+        }
       });
     }
     return res.status(401).json({
