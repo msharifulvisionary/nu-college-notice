@@ -68,9 +68,19 @@ async function startServer() {
     });
   });
 
-  // Core Scrape & Notify Endpoint (Invoked by Vercel Cron or Manual UI Trigger)
+  // Core Scrape & Notify Endpoint (Invoked by external cron service or Manual UI Trigger)
   const handleScrapeAndNotify = async (req: express.Request, res: express.Response) => {
     try {
+      const secretToken = process.env.CRON_SECRET || 'a8f3k29dLp9Xq7Rm4Zt1Wv6Yn0Bc5Hj';
+      const providedToken = (req.query?.token as string) || req.body?.token;
+
+      if (secretToken && providedToken !== secretToken) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized: Invalid or missing token parameter (?token=xxxx)'
+        });
+      }
+
       const customBotToken = req.body?.botToken || req.query?.botToken as string;
       const customChatId = req.body?.chatId || req.query?.chatId as string;
 

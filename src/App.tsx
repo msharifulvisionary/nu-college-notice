@@ -176,7 +176,8 @@ export default function App() {
     setScrapeError(null);
 
     try {
-      const res = await fetch('/api/scrape-and-notify', { method: 'POST' });
+      const defaultToken = 'a8f3k29dLp9Xq7Rm4Zt1Wv6Yn0Bc5Hj';
+      const res = await fetch(`/api/scrape-and-notify?token=${defaultToken}`, { method: 'POST' });
       const data = await res.json();
       if (data.success) {
         setScrapeResult(data.data);
