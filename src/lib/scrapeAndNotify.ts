@@ -61,10 +61,12 @@ export async function runScrapeAndNotify(
         log.error_message = scrapeRes.error || 'Scraping failed';
         console.warn(`[Scraper Engine] ${college.name} scrape failed: ${log.error_message}`);
       } else {
-        log.scraped_count = scrapeRes.notices.length;
-        console.log(`[Scraper Engine] Found ${scrapeRes.notices.length} notice items for ${college.name}`);
+        // Slice top 20 recent notices to prevent memory/time overhead on initial runs
+        const recentNotices = scrapeRes.notices.slice(0, 20);
+        log.scraped_count = recentNotices.length;
+        console.log(`[Scraper Engine] Processing top ${recentNotices.length} recent notice items for ${college.name}`);
 
-        for (const item of scrapeRes.notices) {
+        for (const item of recentNotices) {
           // Generate unique sha256 hash
           const hash = generateNoticeHash(item.title, item.link);
 
