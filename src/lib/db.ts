@@ -181,15 +181,38 @@ export async function dbCheckNoticeExists(collegeId: string, contentHash: string
 }
 
 /**
+ * Check count of existing notices for a specific college
+ */
+export async function dbGetNoticeCountForCollege(collegeId: string): Promise<number> {
+  try {
+    const { count, error } = await supabase
+      .from('notices')
+      .select('id', { count: 'exact', head: true })
+      .eq('college_id', collegeId);
+
+    if (!error && typeof count === 'number') {
+      return count;
+    }
+  } catch {}
+
+  return memoryNotices.filter(n => n.college_id === collegeId).length;
+}
+
+/**
  * Insert a new notice
  */
-export async function dbInsertNotice(notice: Omit<Notice, 'id' | 'created_at' | 'notified'>): Promise<Notice> {
+export async function dbInsertNotice(
+  notice: Omit<Notice, 'id' | 'created_at' | 'notified'> & { notified?: boolean }
+): Promise<Notice> {
   const id = crypto.randomUUID();
+  const isNotified = Boolean(notice.notified);
+  const now = new Date().toISOString();
   const newNotice: Notice = {
     ...notice,
     id,
-    notified: false,
-    created_at: new Date().toISOString(),
+    notified: isNotified,
+    notified_at: isNotified ? now : null,
+    created_at: now,
   };
 
   try {
@@ -200,7 +223,8 @@ export async function dbInsertNotice(notice: Omit<Notice, 'id' | 'created_at' | 
       link: newNotice.link,
       date: newNotice.date,
       content_hash: newNotice.content_hash,
-      notified: false,
+      notified: newNotice.notified,
+      notified_at: newNotice.notified_at,
     }]).select().single();
 
     if (!error && data) {

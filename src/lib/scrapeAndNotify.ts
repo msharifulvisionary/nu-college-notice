@@ -2,6 +2,7 @@ import { generateNoticeHash } from './hash.js';
 import { scrapeCollegeNotices } from './scraper.js';
 import {
   dbGetColleges,
+  dbGetNoticeCountForCollege,
   dbCheckNoticeExists,
   dbInsertNotice,
   dbGetPendingNotices,
@@ -61,31 +62,54 @@ export async function runScrapeAndNotify(
         log.error_message = scrapeRes.error || 'Scraping failed';
         console.warn(`[Scraper Engine] ${college.name} scrape failed: ${log.error_message}`);
       } else {
-        // Slice top 20 recent notices to prevent memory/time overhead on initial runs
+        // 1. Check if there are existing records for this college in the database
+        const existingCount = await dbGetNoticeCountForCollege(college.id);
+        const isFirstRun = existingCount === 0;
+
+        // Slice top 20 recent notices to prevent memory/time overhead
         const recentNotices = scrapeRes.notices.slice(0, 20);
         log.scraped_count = recentNotices.length;
-        console.log(`[Scraper Engine] Processing top ${recentNotices.length} recent notice items for ${college.name}`);
 
-        for (const item of recentNotices) {
-          // Generate unique sha256 hash
-          const hash = generateNoticeHash(item.title, item.link);
-
-          // Check if already exists in database
-          const exists = await dbCheckNoticeExists(college.id, hash);
-
-          if (!exists) {
-            // Insert new unnotified notice
+        if (isFirstRun) {
+          // BASELINE SCAN: First time scraping this college
+          // Save all notices as ALREADY NOTIFIED (notified = true) without sending Telegram messages
+          let savedBaselineCount = 0;
+          for (const item of recentNotices) {
+            const hash = generateNoticeHash(item.title, item.link);
             await dbInsertNotice({
               college_id: college.id,
               title: item.title,
               link: item.link,
               date: item.date,
               content_hash: hash,
+              notified: true, // Marked as notified so no Telegram alerts are dispatched
             });
+            savedBaselineCount += 1;
+          }
+          console.log(`[Scraper Engine] Baseline scan complete for ${college.name}: ${savedBaselineCount} notices saved`);
+        } else {
+          // SUBSEQUENT SCANS: Normal logic to check for new notices
+          console.log(`[Scraper Engine] Processing top ${recentNotices.length} recent notice items for ${college.name}`);
 
-            log.new_count += 1;
-            totalNewNotices += 1;
-            console.log(`[Scraper Engine] 🆕 New notice detected for ${college.name}: "${item.title}"`);
+          for (const item of recentNotices) {
+            const hash = generateNoticeHash(item.title, item.link);
+            const exists = await dbCheckNoticeExists(college.id, hash);
+
+            if (!exists) {
+              // Insert new unnotified notice
+              await dbInsertNotice({
+                college_id: college.id,
+                title: item.title,
+                link: item.link,
+                date: item.date,
+                content_hash: hash,
+                notified: false,
+              });
+
+              log.new_count += 1;
+              totalNewNotices += 1;
+              console.log(`[Scraper Engine] 🆕 New notice detected for ${college.name}: "${item.title}"`);
+            }
           }
         }
       }
