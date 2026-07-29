@@ -66,13 +66,15 @@ export async function runScrapeAndNotify(
         const existingCount = await dbGetNoticeCountForCollege(college.id);
         const isFirstRun = existingCount === 0;
 
-        // Slice top 20 recent notices to prevent memory/time overhead
+        console.log(`[Scraper Engine] Found ${existingCount} existing notices in DB for ${college.name}`);
+
+        // Slice top 20 recent notices (sorted by date, newest ones first)
         const recentNotices = scrapeRes.notices.slice(0, 20);
         log.scraped_count = recentNotices.length;
 
         if (isFirstRun) {
           // BASELINE SCAN: First time scraping this college
-          // Save all notices as ALREADY NOTIFIED (notified = true) without sending Telegram messages
+          // Save all top 20 notices as ALREADY NOTIFIED (notified = true) without sending Telegram messages
           let savedBaselineCount = 0;
           for (const item of recentNotices) {
             const hash = generateNoticeHash(item.title, item.link);
@@ -82,18 +84,17 @@ export async function runScrapeAndNotify(
               link: item.link,
               date: item.date,
               content_hash: hash,
-              notified: true, // Marked as notified so no Telegram alerts are dispatched
+              notified: true, // Marked as notified so no Telegram alerts are dispatched on baseline
             });
             savedBaselineCount += 1;
           }
           console.log(`[Scraper Engine] Baseline scan complete for ${college.name}: ${savedBaselineCount} notices saved`);
         } else {
-          // SUBSEQUENT SCANS: Normal logic to check for new notices
-          console.log(`[Scraper Engine] Processing top ${recentNotices.length} recent notice items for ${college.name}`);
-
+          // SUBSEQUENT SCANS: Check for new notices using notice URL (item.link)
           for (const item of recentNotices) {
             const hash = generateNoticeHash(item.title, item.link);
-            const exists = await dbCheckNoticeExists(college.id, hash);
+            // Check existence primarily by item.link
+            const exists = await dbCheckNoticeExists(college.id, item.link, hash);
 
             if (!exists) {
               // Insert new unnotified notice
@@ -108,9 +109,10 @@ export async function runScrapeAndNotify(
 
               log.new_count += 1;
               totalNewNotices += 1;
-              console.log(`[Scraper Engine] 🆕 New notice detected for ${college.name}: "${item.title}"`);
+              console.log(`[Scraper Engine] 🆕 New notice detected for ${college.name}: "${item.title}" (${item.link})`);
             }
           }
+          console.log(`[Scraper Engine] ${log.new_count} new notices detected for ${college.name}`);
         }
       }
     } catch (err: any) {
@@ -148,6 +150,8 @@ export async function runScrapeAndNotify(
       console.error(`[Telegram Failed]: ${notice.title} -> ${sendRes.error}`);
     }
   }
+
+  console.log(`[Scraper Engine] Sent ${sentCount} telegram messages (${errorCount} failed).`);
 
   return {
     timestamp,

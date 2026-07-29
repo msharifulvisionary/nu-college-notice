@@ -160,24 +160,43 @@ export async function dbDeleteCollege(id: string): Promise<boolean> {
 }
 
 /**
- * Check if a notice with college_id and content_hash exists
+ * Check if a notice with college_id and link (or content_hash) exists
  */
-export async function dbCheckNoticeExists(collegeId: string, contentHash: string): Promise<boolean> {
+export async function dbCheckNoticeExists(collegeId: string, link: string, contentHash?: string): Promise<boolean> {
   try {
-    const { data, error } = await supabase
+    // Primary check by URL link
+    const { data: linkData, error: linkErr } = await supabase
       .from('notices')
       .select('id')
       .eq('college_id', collegeId)
-      .eq('content_hash', contentHash)
+      .eq('link', link)
       .maybeSingle();
 
-    if (!error && data) {
+    if (!linkErr && linkData) {
       return true;
     }
-  } catch {}
 
-  // Check memory store
-  return memoryNotices.some(n => n.college_id === collegeId && n.content_hash === contentHash);
+    // Secondary check by content_hash if provided
+    if (contentHash) {
+      const { data: hashData, error: hashErr } = await supabase
+        .from('notices')
+        .select('id')
+        .eq('college_id', collegeId)
+        .eq('content_hash', contentHash)
+        .maybeSingle();
+
+      if (!hashErr && hashData) {
+        return true;
+      }
+    }
+  } catch (err) {
+    console.warn('[Database Check Notice Error]:', err);
+  }
+
+  // Check memory store fallback
+  return memoryNotices.some(
+    n => n.college_id === collegeId && (n.link === link || (contentHash && n.content_hash === contentHash))
+  );
 }
 
 /**
