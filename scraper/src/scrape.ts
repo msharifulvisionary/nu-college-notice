@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import * as cheerio from 'cheerio';
 import { createClient } from '@supabase/supabase-js';
 
@@ -418,10 +419,35 @@ async function renderSpaWithPlaywright(
   options?: { spaOriginUrl?: string }
 ): Promise<{ html: string; finalUrl: string }> {
   const { chromium } = await import('playwright');
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
+  const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
+  const candidateExecutables = [
+    process.env.CHROME_PATH,
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+  ].filter((p): p is string => Boolean(p && fs.existsSync(p)));
+
+  let browser;
+  if (candidateExecutables.length > 0) {
+    try {
+      browser = await chromium.launch({
+        executablePath: candidateExecutables[0],
+        headless: true,
+        args: launchArgs,
+      });
+    } catch {
+      browser = await chromium.launch({
+        headless: true,
+        args: launchArgs,
+      });
+    }
+  } else {
+    browser = await chromium.launch({
+      headless: true,
+      args: launchArgs,
+    });
+  }
 
   try {
     const context = await browser.newContext({

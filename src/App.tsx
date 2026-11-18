@@ -299,7 +299,7 @@ export default function App() {
     }
   };
 
-  // Test Run Trigger + 3s Polling (max 2 minutes = 40 attempts)
+  // Test Run Trigger + 3s Polling (max 3 minutes = 60 attempts)
   const handleTestScrapeCollege = async (college: College) => {
     if (activePollTimersRef.current[college.id]) {
       window.clearTimeout(activePollTimersRef.current[college.id]);
@@ -315,7 +315,7 @@ export default function App() {
       const triggerRes = await triggerAdminTestRun(college.id, handleUnauthorized);
       const testRunId = triggerRes.test_run_id;
       const startedAt = Date.now();
-      const maxDurationMs = 120000;
+      const maxDurationMs = 180000;
 
       const pollStatus = async () => {
         try {
@@ -337,7 +337,7 @@ export default function App() {
                 isRunning: false,
                 run,
                 error:
-                  '২ মিনিট পার হয়ে গেছে কিন্তু টেস্ট রান শেষ হয়নি। GitHub Actions লগ চেক করুন।',
+                  '৩ মিনিট পার হয়ে গেছে কিন্তু টেস্ট রান শেষ হয়নি। অনুগ্রহ করে কিছুক্ষণ পর আবার টেস্ট করুন অথবা GitHub Actions লগ চেক করুন।',
               },
             }));
             delete activePollTimersRef.current[college.id];

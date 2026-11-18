@@ -50,11 +50,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('scraper/package-lock.json') }}
 
-      - name: Install Playwright Chromium
+      - name: Ensure headless browser for SPA fallback
         working-directory: scraper
         run: |
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
-            npx playwright install chromium --with-deps
+          if command -v google-chrome >/dev/null 2>&1; then
+            echo "Using pre-installed Chrome: $(command -v google-chrome)"
+          elif [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
+            npx playwright install chromium --only-shell --with-deps
           else
             npx playwright install-deps chromium
           fi
