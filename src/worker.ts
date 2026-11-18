@@ -1087,7 +1087,7 @@ async function handleTriggerScanAll(env: Env): Promise<Response> {
       {
         college_id: null,
         status: 'pending',
-        result: { mode: 'normal' },
+        result: { mode: 'normal', trigger: 'manual' },
       },
     ],
   });
@@ -1374,6 +1374,622 @@ async function triggerScheduledAutoScan(
 }
 
 // ============================================================================
+// হেলথ ও স্ক্যান হিস্ট্রি লগ হ্যান্ডলার (GET /api/admin/scan-logs)
+// ============================================================================
+async function handleGetScanLogs(env: Env): Promise<Response> {
+  const [runsRes, collegesRes] = await Promise.all([
+    supabaseRest<TestRunRow[]>(
+      env,
+      'test_runs?order=created_at.desc&limit=60&select=id,college_id,status,result,created_at,updated_at'
+    ),
+    supabaseRest<CollegeRecord[]>(
+      env,
+      'colleges?select=id,name,notice_url,is_active,last_checked_at,last_status,last_error,consecutive_failures,created_at&order=created_at.desc'
+    ),
+  ]);
+
+  if (!runsRes.ok) {
+    return jsonResponse(
+      { error: `স্ক্যান লগ লোড করতে সমস্যা হয়েছে: ${runsRes.errorMessage}` },
+      runsRes.status >= 400 ? runsRes.status : 500
+    );
+  }
+
+  const collegesList = collegesRes.ok && collegesRes.data ? collegesRes.data : [];
+  const collegeNameById = new Map<string, string>();
+  for (const c of collegesList) {
+    collegeNameById.set(c.id, c.name);
+  }
+
+  const logs = (runsRes.data || []).map((run) => {
+    const resultObj =
+      run.result && typeof run.result === 'object' ? (run.result as Record<string, unknown>) : null;
+    const resultCollegeName =
+      typeof resultObj?.college_name === 'string' ? resultObj.college_name : null;
+
+    return {
+      ...run,
+      college_name:
+        resultCollegeName || (run.college_id ? collegeNameById.get(run.college_id) || null : null),
+    };
+  });
+
+  return jsonResponse({
+    logs,
+    colleges_health: collegesList,
+  });
+}
+
+// ============================================================================
+// টেলিগ্রাম বট ইন্টারেক্টিভ কমান্ড (/latest, /notice, /colleges, /help) ও Webhook
+// ============================================================================
+const WORKER_BN_DIGITS: Record<string, string> = {
+  '০': '0',
+  '১': '1',
+  '২': '2',
+  '৩': '3',
+  '৪': '4',
+  '৫': '5',
+  '৬': '6',
+  '৭': '7',
+  '৮': '8',
+  '৯': '9',
+};
+
+const WORKER_MONTH_MAP: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  জানু: 1,
+  জানুয়ারি: 1,
+  জানুয়ারি: 1,
+  feb: 2,
+  february: 2,
+  ফেব্রু: 2,
+  ফেব্রুয়ারি: 2,
+  ফেব্রুয়ারি: 2,
+  mar: 3,
+  march: 3,
+  মার্চ: 3,
+  apr: 4,
+  april: 4,
+  এপ্রিল: 4,
+  may: 5,
+  মে: 5,
+  jun: 6,
+  june: 6,
+  জুন: 6,
+  jul: 7,
+  july: 7,
+  জুলাই: 7,
+  aug: 8,
+  august: 8,
+  আগস্ট: 8,
+  অগাস্ট: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  সেপ্টেম্বর: 9,
+  oct: 10,
+  october: 10,
+  অক্টোবর: 10,
+  nov: 11,
+  november: 11,
+  নভেম্বর: 11,
+  dec: 12,
+  december: 12,
+  ডিসেম্বর: 12,
+};
+
+function parseWorkerNoticeDateMs(rawDate?: string | null): number | null {
+  if (!rawDate) return null;
+  const cleaned = rawDate
+    .replace(/[০-৯]/g, (d) => WORKER_BN_DIGITS[d] || d)
+    .replace(/(\d+)(st|nd|rd|th|ই|শে|লা|রা|ঠা)\b/gi, '$1')
+    .replace(/,/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) return null;
+
+  const buildMs = (y: number, m: number, d: number): number | null => {
+    if (y < 1990 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+    const ms = Date.parse(
+      `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T12:00:00+06:00`
+    );
+    return Number.isNaN(ms) ? null : ms;
+  };
+
+  const isoMatch = cleaned.match(/\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b/);
+  if (isoMatch) {
+    const ms = buildMs(Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3]));
+    if (ms !== null) return ms;
+  }
+
+  const dmyMatch = cleaned.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
+  if (dmyMatch) {
+    const first = Number(dmyMatch[1]);
+    const second = Number(dmyMatch[2]);
+    const year = Number(dmyMatch[3]);
+    const day = second > 12 ? second : first;
+    const month = second > 12 ? first : second;
+    const ms = buildMs(year, month, day);
+    if (ms !== null) return ms;
+  }
+
+  const tokens = cleaned.toLowerCase().split(/[\s-]+/).filter(Boolean);
+  for (let i = 0; i < tokens.length; i++) {
+    const month = WORKER_MONTH_MAP[tokens[i]];
+    if (!month) continue;
+    const prevNum = i > 0 ? Number(tokens[i - 1]) : NaN;
+    const nextNum = i + 1 < tokens.length ? Number(tokens[i + 1]) : NaN;
+    const next2Num = i + 2 < tokens.length ? Number(tokens[i + 2]) : NaN;
+
+    if (Number.isInteger(prevNum) && prevNum >= 1 && prevNum <= 31 && Number.isInteger(nextNum) && nextNum >= 1990) {
+      const ms = buildMs(nextNum, month, prevNum);
+      if (ms !== null) return ms;
+    }
+    if (Number.isInteger(nextNum) && nextNum >= 1 && nextNum <= 31 && Number.isInteger(next2Num) && next2Num >= 1990) {
+      const ms = buildMs(next2Num, month, nextNum);
+      if (ms !== null) return ms;
+    }
+  }
+
+  const nativeMs = Date.parse(cleaned);
+  return Number.isNaN(nativeMs) ? null : nativeMs;
+}
+
+function escapeTelegramHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function toBengaliNumber(num: number): string {
+  const bnDigits = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
+  return String(num).replace(/\d/g, (d) => bnDigits[Number(d)] || d);
+}
+
+interface WebhookNoticeRow {
+  id: string;
+  college_id: string;
+  title: string;
+  link: string;
+  date?: string | null;
+  published_at?: string | null;
+  created_at?: string | null;
+  colleges?: { name?: string } | Array<{ name?: string }> | null;
+}
+
+async function fetchSortedNoticesForBot(env: Env): Promise<
+  Array<{
+    id: string;
+    college_name: string;
+    title: string;
+    link: string;
+    date: string;
+    sortMs: number;
+  }>
+> {
+  let res = await supabaseRest<WebhookNoticeRow[]>(
+    env,
+    'notices?select=id,college_id,title,link,date,published_at,created_at,colleges(name)&order=published_at.desc.nullslast,created_at.desc&limit=120'
+  );
+
+  if (!res.ok && res.errorMessage && /published_at/i.test(res.errorMessage)) {
+    res = await supabaseRest<WebhookNoticeRow[]>(
+      env,
+      'notices?select=id,college_id,title,link,date,created_at,colleges(name)&order=created_at.desc&limit=120'
+    );
+  }
+
+  if (!res.ok || !res.data) return [];
+
+  const items = res.data.map((row) => {
+    const rel = Array.isArray(row.colleges) ? row.colleges[0] : row.colleges;
+    const pubMs = row.published_at ? Date.parse(row.published_at) : NaN;
+    const parsedDateMs = parseWorkerNoticeDateMs(row.date);
+    const createdMs = row.created_at ? Date.parse(row.created_at) : NaN;
+    const sortMs = !Number.isNaN(pubMs)
+      ? pubMs
+      : parsedDateMs !== null
+      ? parsedDateMs
+      : !Number.isNaN(createdMs)
+      ? createdMs
+      : 0;
+
+    return {
+      id: row.id,
+      college_name: rel?.name || 'কলেজ নোটিশ',
+      title: row.title,
+      link: row.link,
+      date: row.date || '',
+      sortMs,
+    };
+  });
+
+  items.sort((a, b) => b.sortMs - a.sortMs);
+  return items;
+}
+
+async function sendTelegramBotReply(
+  botToken: string,
+  payload: {
+    chat_id: string | number;
+    text: string;
+    message_thread_id?: number;
+    reply_to_message_id?: number;
+  }
+): Promise<void> {
+  const body: Record<string, unknown> = {
+    chat_id: payload.chat_id,
+    text: payload.text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  };
+  if (payload.message_thread_id) {
+    body.message_thread_id = payload.message_thread_id;
+  }
+  if (payload.reply_to_message_id) {
+    body.reply_to_message_id = payload.reply_to_message_id;
+  }
+
+  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+async function handleTelegramWebhook(request: Request, env: Env): Promise<Response> {
+  const settingsRes = await supabaseRest<SettingRow[]>(
+    env,
+    'settings?key=in.(telegram_bot_token,telegram_webhook_secret)&select=key,value'
+  );
+
+  if (!settingsRes.ok || !settingsRes.data) {
+    return jsonResponse({ ok: true });
+  }
+
+  let botToken = '';
+  let expectedSecret = '';
+  for (const row of settingsRes.data) {
+    if (row.key === 'telegram_bot_token') botToken = (row.value || '').trim();
+    if (row.key === 'telegram_webhook_secret') expectedSecret = (row.value || '').trim();
+  }
+
+  if (expectedSecret) {
+    const incomingSecret = (request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '').trim();
+    if (incomingSecret !== expectedSecret) {
+      return jsonResponse({ error: 'অননুমোদিত টেলিগ্রাম Webhook অনুরোধ।' }, 401);
+    }
+  }
+
+  if (!botToken) {
+    return jsonResponse({ ok: true });
+  }
+
+  let update: {
+    message?: {
+      message_id?: number;
+      message_thread_id?: number;
+      text?: string;
+      chat?: { id?: number | string; type?: string };
+    };
+    channel_post?: {
+      message_id?: number;
+      message_thread_id?: number;
+      text?: string;
+      chat?: { id?: number | string; type?: string };
+    };
+  };
+
+  try {
+    update = (await request.json()) as typeof update;
+  } catch {
+    return jsonResponse({ ok: true });
+  }
+
+  const msg = update.message || update.channel_post;
+  const rawText = (msg?.text || '').trim();
+  const chatId = msg?.chat?.id;
+
+  if (!msg || !rawText || chatId === undefined || chatId === null || !rawText.startsWith('/')) {
+    return jsonResponse({ ok: true });
+  }
+
+  const cmdMatch = rawText.match(/^\/([a-zA-Z0-9_]+)(?:@[a-zA-Z0-9_]+)?(?:\s+([\s\S]*))?$/);
+  if (!cmdMatch) {
+    return jsonResponse({ ok: true });
+  }
+
+  const command = cmdMatch[1].toLowerCase();
+  const rawArg = (cmdMatch[2] || '').trim();
+  const isGroup = msg.chat?.type === 'group' || msg.chat?.type === 'supergroup';
+  const replyToMessageId = isGroup && msg.message_id ? msg.message_id : undefined;
+
+  if (command === 'start' || command === 'help') {
+    const helpLines = [
+      '🔔 <b>জাতীয় বিশ্ববিদ্যালয় ও কলেজ নোটিশ বট</b>',
+      '',
+      'নিচের কমান্ডগুলো ব্যবহার করে যেকোনো সময় সর্বশেষ নোটিশ দেখতে পারবেন:',
+      '• /latest — সর্বশেষ ৮টি নোটিশ দেখুন',
+      '• /latest 10 — সর্বশেষ ১০টি নোটিশ দেখুন (৫–১০)',
+      '• /notice &lt;কলেজ বা বিষয়&gt; — নির্দিষ্ট কলেজ বা কীওয়ার্ড দিয়ে খুঁজুন',
+      '  <i>উদাহরণ:</i> <code>/notice ফরম</code> বা <code>/notice আজিজুল</code>',
+      '• /colleges — সংযুক্ত সক্রিয় কলেজগুলোর তালিকা দেখুন',
+      '• /help — কমান্ড সহায়িকা দেখুন',
+    ];
+
+    await sendTelegramBotReply(botToken, {
+      chat_id: chatId,
+      text: helpLines.join('\n'),
+      message_thread_id: msg.message_thread_id,
+      reply_to_message_id: replyToMessageId,
+    });
+    return jsonResponse({ ok: true });
+  }
+
+  if (command === 'colleges') {
+    const colRes = await supabaseRest<CollegeRecord[]>(
+      env,
+      'colleges?is_active=eq.true&select=id,name,notice_url&order=name.asc'
+    );
+    const colleges = colRes.ok && colRes.data ? colRes.data : [];
+
+    if (colleges.length === 0) {
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: 'ℹ️ বর্তমানে কোনো সক্রিয় কলেজ যুক্ত নেই।',
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    const lines = [
+      `🏫 <b>মনিটরকৃত সক্রিয় কলেজসমূহ (${toBengaliNumber(colleges.length)} টি):</b>`,
+      '',
+      ...colleges.map(
+        (c, idx) =>
+          `${toBengaliNumber(idx + 1)}. <b>${escapeTelegramHtml(c.name)}</b>\n🔗 <a href="${escapeTelegramHtml(c.notice_url)}">নোটিশ বোর্ড দেখুন</a>`
+      ),
+    ];
+
+    await sendTelegramBotReply(botToken, {
+      chat_id: chatId,
+      text: lines.join('\n'),
+      message_thread_id: msg.message_thread_id,
+      reply_to_message_id: replyToMessageId,
+    });
+    return jsonResponse({ ok: true });
+  }
+
+  if (command === 'latest' || command === 'notice' || command === 'notices') {
+    let limit = 8;
+    let queryTerm = '';
+
+    if (rawArg) {
+      const asciiArg = rawArg.replace(/[০-৯]/g, (d) => WORKER_BN_DIGITS[d] || d).trim();
+      const numOnlyMatch = asciiArg.match(/^(\d{1,2})$/);
+      const leadingNumMatch = asciiArg.match(/^(\d{1,2})\s+([\s\S]+)$/);
+
+      if (numOnlyMatch) {
+        limit = Math.min(10, Math.max(1, Number(numOnlyMatch[1])));
+      } else if (leadingNumMatch) {
+        limit = Math.min(10, Math.max(1, Number(leadingNumMatch[1])));
+        queryTerm = leadingNumMatch[2].trim();
+      } else {
+        queryTerm = rawArg;
+      }
+    }
+
+    const allNotices = await fetchSortedNoticesForBot(env);
+    const filtered = queryTerm
+      ? allNotices.filter((n) => {
+          const q = queryTerm.toLowerCase();
+          return (
+            n.title.toLowerCase().includes(q) || n.college_name.toLowerCase().includes(q)
+          );
+        })
+      : allNotices;
+
+    const selected = filtered.slice(0, limit);
+
+    if (selected.length === 0) {
+      const emptyMsg = queryTerm
+        ? `ℹ️ "<b>${escapeTelegramHtml(queryTerm)}</b>" সম্পর্কিত কোনো নোটিশ পাওয়া যায়নি।`
+        : 'ℹ️ ডাটাবেজে এখনো কোনো নোটিশ সংরক্ষিত নেই।';
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: emptyMsg,
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    const headerTitle = queryTerm
+      ? `🔎 <b>"${escapeTelegramHtml(queryTerm)}" সম্পর্কিত সর্বশেষ ${toBengaliNumber(selected.length)}টি নোটিশ:</b>`
+      : `📰 <b>সর্বশেষ ${toBengaliNumber(selected.length)}টি নোটিশ:</b>`;
+
+    const formattedItems = selected.map((item, idx) => {
+      const datePart = item.date ? ` · 📅 ${escapeTelegramHtml(item.date)}` : '';
+      return `${toBengaliNumber(idx + 1)}. <b>${escapeTelegramHtml(item.college_name)}</b>${datePart}\n<a href="${escapeTelegramHtml(item.link)}">${escapeTelegramHtml(item.title)}</a>`;
+    });
+
+    const footer = `\n🌐 সব নোটিশ একসাথে: ${escapeTelegramHtml(new URL(request.url).origin)}`;
+
+    await sendTelegramBotReply(botToken, {
+      chat_id: chatId,
+      text: [headerTitle, '', ...formattedItems, footer].join('\n\n'),
+      message_thread_id: msg.message_thread_id,
+      reply_to_message_id: replyToMessageId,
+    });
+    return jsonResponse({ ok: true });
+  }
+
+  return jsonResponse({ ok: true });
+}
+
+async function handleGetTelegramWebhook(request: Request, env: Env): Promise<Response> {
+  const settings = await fetchTelegramSettings(env);
+  if (!settings.ok) {
+    return jsonResponse({ error: settings.errorMessage }, 500);
+  }
+
+  const expectedUrl = `${new URL(request.url).origin}/api/telegram/webhook`;
+  if (!settings.botToken) {
+    return jsonResponse({
+      configured: false,
+      webhook_url: '',
+      expected_url: expectedUrl,
+      matches_expected: false,
+      bot_username: null,
+      bot_name: null,
+    });
+  }
+
+  try {
+    const [meRes, infoRes] = await Promise.all([
+      fetch(`https://api.telegram.org/bot${settings.botToken}/getMe`),
+      fetch(`https://api.telegram.org/bot${settings.botToken}/getWebhookInfo`),
+    ]);
+
+    const meData = (await meRes.json().catch(() => ({}))) as {
+      ok?: boolean;
+      result?: { username?: string; first_name?: string };
+    };
+    const infoData = (await infoRes.json().catch(() => ({}))) as {
+      ok?: boolean;
+      result?: {
+        url?: string;
+        pending_update_count?: number;
+        last_error_message?: string;
+        last_error_date?: number;
+      };
+    };
+
+    const currentUrl = infoData.result?.url || '';
+    return jsonResponse({
+      configured: Boolean(currentUrl),
+      webhook_url: currentUrl,
+      expected_url: expectedUrl,
+      matches_expected: currentUrl === expectedUrl,
+      bot_username: meData.result?.username || null,
+      bot_name: meData.result?.first_name || null,
+      pending_update_count: infoData.result?.pending_update_count ?? 0,
+      last_error_message: infoData.result?.last_error_message || null,
+      last_error_date: infoData.result?.last_error_date || null,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return jsonResponse({ error: `টেলিগ্রাম Webhook তথ্য আনা যায়নি: ${msg}` }, 502);
+  }
+}
+
+async function handleRegisterTelegramWebhook(request: Request, env: Env): Promise<Response> {
+  const settings = await fetchTelegramSettings(env);
+  if (!settings.ok) {
+    return jsonResponse({ error: settings.errorMessage }, 500);
+  }
+
+  if (!settings.botToken) {
+    return jsonResponse(
+      { error: 'আগে Telegram Bot Token ও Chat ID সেভ করুন।' },
+      400
+    );
+  }
+
+  // Webhook সিক্রেট না থাকলে স্বয়ংক্রিয়ভাবে তৈরি করে ডাটাবেজে সেভ করা হচ্ছে
+  const secretQuery = await supabaseRest<SettingRow[]>(
+    env,
+    'settings?key=eq.telegram_webhook_secret&select=key,value'
+  );
+  let webhookSecret =
+    secretQuery.ok && secretQuery.data?.[0]?.value ? secretQuery.data[0].value.trim() : '';
+
+  if (!webhookSecret) {
+    webhookSecret = crypto.randomUUID().replace(/-/g, '');
+    await supabaseRest(env, 'settings?on_conflict=key', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates',
+      body: [
+        {
+          key: 'telegram_webhook_secret',
+          value: webhookSecret,
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+  }
+
+  const expectedUrl = `${new URL(request.url).origin}/api/telegram/webhook`;
+
+  try {
+    const [setRes, cmdRes, meRes] = await Promise.all([
+      fetch(`https://api.telegram.org/bot${settings.botToken}/setWebhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: expectedUrl,
+          secret_token: webhookSecret,
+          allowed_updates: ['message', 'channel_post'],
+        }),
+      }),
+      fetch(`https://api.telegram.org/bot${settings.botToken}/setMyCommands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          commands: [
+            { command: 'latest', description: 'সর্বশেষ ৮টি নোটিশ দেখুন' },
+            { command: 'notice', description: 'সর্বশেষ নোটিশ দেখুন বা খুঁজুন' },
+            { command: 'colleges', description: 'সক্রিয় কলেজগুলোর তালিকা দেখুন' },
+            { command: 'help', description: 'বট কমান্ড সহায়িকা' },
+          ],
+        }),
+      }),
+      fetch(`https://api.telegram.org/bot${settings.botToken}/getMe`),
+    ]);
+
+    const setData = (await setRes.json().catch(() => ({}))) as {
+      ok?: boolean;
+      description?: string;
+    };
+    const meData = (await meRes.json().catch(() => ({}))) as {
+      ok?: boolean;
+      result?: { username?: string; first_name?: string };
+    };
+    await cmdRes.text().catch(() => '');
+
+    if (!setRes.ok || !setData.ok) {
+      return jsonResponse(
+        {
+          error:
+            setData.description ||
+            `টেলিগ্রাম Webhook চালু করা যায়নি (HTTP ${setRes.status})।`,
+        },
+        400
+      );
+    }
+
+    return jsonResponse({
+      configured: true,
+      webhook_url: expectedUrl,
+      expected_url: expectedUrl,
+      matches_expected: true,
+      bot_username: meData.result?.username || null,
+      bot_name: meData.result?.first_name || null,
+      pending_update_count: 0,
+      last_error_message: null,
+      last_error_date: null,
+      message:
+        'টেলিগ্রাম বট কমান্ড (/latest, /notice, /colleges) ও Webhook সফলভাবে চালু হয়েছে!',
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return jsonResponse({ error: `টেলিগ্রাম Webhook সেটআপ ব্যর্থ হয়েছে: ${msg}` }, 502);
+  }
+}
+
+// ============================================================================
 // মেইন Cloudflare Worker fetch ও scheduled (Cron) হ্যান্ডলার
 // ============================================================================
 export default {
@@ -1383,6 +1999,14 @@ export default {
 
     // শুধুমাত্র /api/* রুটগুলো Worker নিজে হ্যান্ডেল করবে
     if (pathname.startsWith('/api/')) {
+      // টেলিগ্রাম বট ইন্টারেক্টিভ Webhook (/latest, /notice, /colleges, /help)
+      if (pathname === '/api/telegram/webhook') {
+        if (request.method !== 'POST') {
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+        return handleTelegramWebhook(request, env);
+      }
+
       // অপশনাল External Cron Webhook (যেমন cron-job.org ব্যাকআপের জন্য)
       if (pathname === '/api/cron/scan') {
         if (request.method !== 'POST' && request.method !== 'GET') {
@@ -1441,6 +2065,19 @@ export default {
         if (pathname === '/api/admin/automation') {
           if (request.method === 'GET') return handleGetAutomation(env);
           if (request.method === 'PUT') return handleUpdateAutomation(request, env);
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+
+        // ৫খ. হেলথ ও স্ক্যান হিস্ট্রি লগ পড়া
+        if (pathname === '/api/admin/scan-logs') {
+          if (request.method === 'GET') return handleGetScanLogs(env);
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+
+        // ৫গ. টেলিগ্রাম ইন্টারেক্টিভ বট কমান্ড Webhook অবস্থা ও রেজিস্ট্রেশন
+        if (pathname === '/api/admin/telegram-webhook') {
+          if (request.method === 'GET') return handleGetTelegramWebhook(request, env);
+          if (request.method === 'POST') return handleRegisterTelegramWebhook(request, env);
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 

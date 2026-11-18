@@ -2,7 +2,9 @@ import {
   AutomationStatusResponse,
   College,
   CollegePayload,
+  ScanLogsResponse,
   TelegramSettingsResponse,
+  TelegramWebhookStatus,
   TestRunRecord,
 } from '../types';
 import { getAdminSession, signOutAdmin } from './supabase';
@@ -237,6 +239,36 @@ export async function updateAdminAutomation(
       method: 'PUT',
       body: JSON.stringify({ auto_scan_enabled: autoScanEnabled }),
     },
+    onUnauthorized
+  );
+}
+
+export async function fetchAdminScanLogs(
+  onUnauthorized?: UnauthorizedHandler
+): Promise<ScanLogsResponse> {
+  return adminRequest<ScanLogsResponse>(
+    '/api/admin/scan-logs',
+    { method: 'GET' },
+    onUnauthorized
+  );
+}
+
+export async function fetchAdminTelegramWebhook(
+  onUnauthorized?: UnauthorizedHandler
+): Promise<TelegramWebhookStatus> {
+  return adminRequest<TelegramWebhookStatus>(
+    '/api/admin/telegram-webhook',
+    { method: 'GET' },
+    onUnauthorized
+  );
+}
+
+export async function registerAdminTelegramWebhook(
+  onUnauthorized?: UnauthorizedHandler
+): Promise<TelegramWebhookStatus> {
+  return adminRequest<TelegramWebhookStatus>(
+    '/api/admin/telegram-webhook',
+    { method: 'POST' },
     onUnauthorized
   );
 }

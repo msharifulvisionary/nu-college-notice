@@ -7,7 +7,15 @@ import { CollegeList, CollegeTestUiState, ScanAllUiState } from './components/Co
 import { AddCollegeModal } from './components/AddCollegeModal';
 import { NoticeHistory } from './components/NoticeHistory';
 import { TelegramTester } from './components/TelegramTester';
-import { AutomationStatusResponse, College, CollegePayload, Notice, SystemStatus } from './types';
+import { ScanLogsTab } from './components/ScanLogsTab';
+import {
+  AutomationStatusResponse,
+  College,
+  CollegePayload,
+  Notice,
+  ScanLogEntry,
+  SystemStatus,
+} from './types';
 import {
   isSupabaseConfigured,
   supabase,
@@ -33,8 +41,11 @@ import {
   fetchAdminTestRunStatus,
   fetchAdminAutomation,
   updateAdminAutomation,
+  fetchAdminScanLogs,
+  fetchAdminTelegramWebhook,
+  registerAdminTelegramWebhook,
 } from './lib/adminApi';
-import { Building2, Layers, Send, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Building2, Layers, Send, AlertTriangle, CheckCircle2, Activity } from 'lucide-react';
 
 function isAdminPath(): boolean {
   if (typeof window === 'undefined') return false;
@@ -45,7 +56,9 @@ export default function App() {
   const [currentView, setCurrentView] = useState<'home' | 'admin'>(() =>
     isAdminPath() ? 'admin' : 'home'
   );
-  const [activeTab, setActiveTab] = useState<'colleges' | 'notices' | 'telegram'>('colleges');
+  const [activeTab, setActiveTab] = useState<'colleges' | 'notices' | 'logs' | 'telegram'>(
+    'colleges'
+  );
 
   // Auth state (Supabase Auth)
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -79,6 +92,10 @@ export default function App() {
   const [automationStatus, setAutomationStatus] = useState<AutomationStatusResponse | null>(null);
   const [isLoadingAutomation, setIsLoadingAutomation] = useState(false);
   const [isTogglingAutomation, setIsTogglingAutomation] = useState(false);
+  const [scanLogs, setScanLogs] = useState<ScanLogEntry[]>([]);
+  const [collegesHealth, setCollegesHealth] = useState<College[]>([]);
+  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
 
   const activePollTimersRef = useRef<Record<string, number>>({});
   const scanAllTimerRef = useRef<number | null>(null);
@@ -228,6 +245,23 @@ export default function App() {
     }
   }, [isAdminLoggedIn, handleUnauthorized]);
 
+  // Load scan & health logs via authenticated Worker endpoint
+  const loadScanLogs = useCallback(async () => {
+    if (!isAdminLoggedIn) return;
+    setIsLoadingLogs(true);
+    setLogsError(null);
+    try {
+      const data = await fetchAdminScanLogs(handleUnauthorized);
+      setScanLogs(data.logs || []);
+      setCollegesHealth(data.colleges_health || []);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'স্ক্যান লগ লোড করতে সমস্যা হয়েছে।';
+      setLogsError(msg);
+    } finally {
+      setIsLoadingLogs(false);
+    }
+  }, [isAdminLoggedIn, handleUnauthorized]);
+
   useEffect(() => {
     fetchPublicData();
   }, [fetchPublicData]);
@@ -236,15 +270,23 @@ export default function App() {
     if (currentView === 'admin' && isAdminLoggedIn) {
       loadAdminColleges();
       loadAutomationStatus();
+      loadScanLogs();
     }
-  }, [currentView, isAdminLoggedIn, loadAdminColleges, loadAutomationStatus]);
+  }, [currentView, isAdminLoggedIn, loadAdminColleges, loadAutomationStatus, loadScanLogs]);
 
   const handleRefreshAll = useCallback(async () => {
     await fetchPublicData();
     if (currentView === 'admin' && isAdminLoggedIn) {
-      await Promise.all([loadAdminColleges(), loadAutomationStatus()]);
+      await Promise.all([loadAdminColleges(), loadAutomationStatus(), loadScanLogs()]);
     }
-  }, [fetchPublicData, currentView, isAdminLoggedIn, loadAdminColleges, loadAutomationStatus]);
+  }, [
+    fetchPublicData,
+    currentView,
+    isAdminLoggedIn,
+    loadAdminColleges,
+    loadAutomationStatus,
+    loadScanLogs,
+  ]);
 
   const handleLoginSuccess = () => {
     setAuthNotice(null);
@@ -536,6 +578,16 @@ export default function App() {
     [handleUnauthorized]
   );
 
+  const handleLoadWebhookStatus = useCallback(
+    () => fetchAdminTelegramWebhook(handleUnauthorized),
+    [handleUnauthorized]
+  );
+
+  const handleRegisterWebhook = useCallback(
+    () => registerAdminTelegramWebhook(handleUnauthorized),
+    [handleUnauthorized]
+  );
+
   // Render Public Home View
   if (currentView === 'home') {
     return (
@@ -660,6 +712,21 @@ export default function App() {
           </button>
 
           <button
+            onClick={() => {
+              setActiveTab('logs');
+              loadScanLogs();
+            }}
+            className={`flex items-center space-x-1.5 sm:space-x-2 px-3.5 sm:px-5 py-2.5 sm:py-3 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex-1 justify-center ${
+              activeTab === 'logs'
+                ? 'bg-emerald-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <Activity className="w-4 h-4 shrink-0" />
+            <span>হেলথ ও স্ক্যান লগ</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('telegram')}
             className={`flex items-center space-x-1.5 sm:space-x-2 px-3.5 sm:px-5 py-2.5 sm:py-3 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex-1 justify-center ${
               activeTab === 'telegram'
@@ -703,12 +770,24 @@ export default function App() {
 
         {activeTab === 'notices' && <NoticeHistory notices={notices} colleges={colleges} />}
 
+        {activeTab === 'logs' && (
+          <ScanLogsTab
+            logs={scanLogs}
+            collegesHealth={collegesHealth.length > 0 ? collegesHealth : colleges}
+            isLoading={isLoadingLogs}
+            error={logsError}
+            onRefreshLogs={loadScanLogs}
+          />
+        )}
+
         {activeTab === 'telegram' && (
           <TelegramTester
             onLoadSettings={handleLoadTelegramSettings}
             onSaveSettings={handleSaveTelegramSettings}
             onTestTelegram={handleSendTelegramTest}
             onSendDailyDigest={handleSendDailyDigest}
+            onLoadWebhookStatus={handleLoadWebhookStatus}
+            onRegisterWebhook={handleRegisterWebhook}
           />
         )}
       </main>

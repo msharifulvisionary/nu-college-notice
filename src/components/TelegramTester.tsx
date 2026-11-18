@@ -10,8 +10,10 @@ import {
   EyeOff,
   Loader2,
   BarChart3,
+  Webhook,
+  RefreshCw,
 } from 'lucide-react';
-import { TelegramSettingsResponse } from '../types';
+import { TelegramSettingsResponse, TelegramWebhookStatus } from '../types';
 
 interface TelegramTesterProps {
   onLoadSettings: () => Promise<TelegramSettingsResponse>;
@@ -21,6 +23,8 @@ interface TelegramTesterProps {
   }) => Promise<TelegramSettingsResponse>;
   onTestTelegram: (message?: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
   onSendDailyDigest: () => Promise<{ ok: boolean; message?: string; error?: string }>;
+  onLoadWebhookStatus: () => Promise<TelegramWebhookStatus>;
+  onRegisterWebhook: () => Promise<TelegramWebhookStatus>;
 }
 
 export const TelegramTester: React.FC<TelegramTesterProps> = ({
@@ -28,6 +32,8 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
   onSaveSettings,
   onTestTelegram,
   onSendDailyDigest,
+  onLoadWebhookStatus,
+  onRegisterWebhook,
 }) => {
   const [botToken, setBotToken] = useState('');
   const [maskedToken, setMaskedToken] = useState('');
@@ -45,29 +51,44 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
   const [isSendingDigest, setIsSendingDigest] = useState(false);
   const [resultMsg, setResultMsg] = useState<{ success: boolean; text: string } | null>(null);
 
+  const [webhookStatus, setWebhookStatus] = useState<TelegramWebhookStatus | null>(null);
+  const [isLoadingWebhook, setIsLoadingWebhook] = useState(false);
+  const [isRegisteringWebhook, setIsRegisteringWebhook] = useState(false);
+  const [webhookMsg, setWebhookMsg] = useState<{ success: boolean; text: string } | null>(null);
+
   useEffect(() => {
     let isMounted = true;
     const load = async () => {
       setIsLoadingSettings(true);
+      setIsLoadingWebhook(true);
       try {
-        const data = await onLoadSettings();
+        const [data, hookData] = await Promise.all([
+          onLoadSettings(),
+          onLoadWebhookStatus().catch(() => null),
+        ]);
         if (!isMounted) return;
         setMaskedToken(data.telegram_bot_token_masked || '');
         setHasSavedToken(Boolean(data.has_telegram_bot_token));
         setChatId(data.telegram_chat_id || '');
+        if (hookData) {
+          setWebhookStatus(hookData);
+        }
       } catch (err: unknown) {
         if (!isMounted) return;
         const msg = err instanceof Error ? err.message : 'সেটিংস লোড করতে সমস্যা হয়েছে।';
         setResultMsg({ success: false, text: msg });
       } finally {
-        if (isMounted) setIsLoadingSettings(false);
+        if (isMounted) {
+          setIsLoadingSettings(false);
+          setIsLoadingWebhook(false);
+        }
       }
     };
     load();
     return () => {
       isMounted = false;
     };
-  }, [onLoadSettings]);
+  }, [onLoadSettings, onLoadWebhookStatus]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -154,10 +175,43 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
     }
   };
 
+  const handleRefreshWebhook = async () => {
+    setIsLoadingWebhook(true);
+    setWebhookMsg(null);
+    try {
+      const data = await onLoadWebhookStatus();
+      setWebhookStatus(data);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Webhook তথ্য আনা যায়নি।';
+      setWebhookMsg({ success: false, text: msg });
+    } finally {
+      setIsLoadingWebhook(false);
+    }
+  };
+
+  const handleActivateBotCommands = async () => {
+    setIsRegisteringWebhook(true);
+    setWebhookMsg(null);
+    try {
+      const data = await onRegisterWebhook();
+      setWebhookStatus(data);
+      setWebhookMsg({
+        success: true,
+        text: data.message || 'টেলিগ্রাম বট কমান্ড ও Webhook সফলভাবে চালু হয়েছে!',
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Webhook চালু করা যায়নি।';
+      setWebhookMsg({ success: false, text: msg });
+    } finally {
+      setIsRegisteringWebhook(false);
+    }
+  };
+
   const anyBusy = isSaving || isTesting || isSendingDigest;
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl sm:rounded-2xl p-3.5 sm:p-6 shadow-xs mb-8">
+    <div className="space-y-6 mb-8">
+    <div className="bg-white border border-slate-200 rounded-xl sm:rounded-2xl p-3.5 sm:p-6 shadow-xs">
       {/* Header */}
       <div className="flex items-center space-x-3 pb-3.5 border-b border-slate-100">
         <div className="w-9 h-9 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
@@ -316,6 +370,141 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
           </div>
         </form>
       )}
+    </div>
+
+    {/* Interactive Bot Commands & Group Setup Panel */}
+    <div className="bg-white border border-slate-200 rounded-xl sm:rounded-2xl p-3.5 sm:p-6 shadow-xs">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 border-b border-slate-100">
+        <div className="flex items-center space-x-3">
+          <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+            <Webhook className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="text-sm sm:text-base font-bold text-slate-900">
+              ইন্টারেক্টিভ বট কমান্ড ও গ্রুপ সাপোর্ট (/latest, /notice)
+            </h3>
+            <p className="text-[11px] sm:text-xs text-slate-500">
+              এক ক্লিকে Webhook চালু করলে গ্রুপ বা ইনবক্সে /latest ও /notice লিখলেই সর্বশেষ ৫–১০টি নোটিশ দেখাবে
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleRefreshWebhook}
+            disabled={isLoadingWebhook || isRegisteringWebhook}
+            className="inline-flex items-center space-x-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoadingWebhook ? 'animate-spin' : ''}`} />
+            <span>যাচাই</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleActivateBotCommands}
+            disabled={isRegisteringWebhook || !hasSavedToken}
+            className="inline-flex items-center space-x-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+          >
+            {isRegisteringWebhook ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Webhook className="w-3.5 h-3.5" />
+            )}
+            <span>
+              {webhookStatus?.matches_expected ? 'বট কমান্ড রি-সিঙ্ক করুন' : 'বট কমান্ড চালু করুন'}
+            </span>
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-4 text-xs">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-600">
+          <span>
+            স্ট্যাটাস:{' '}
+            <strong
+              className={
+                webhookStatus?.matches_expected
+                  ? 'text-emerald-700'
+                  : webhookStatus?.configured
+                  ? 'text-amber-700'
+                  : 'text-slate-700'
+              }
+            >
+              {isLoadingWebhook
+                ? 'যাচাই হচ্ছে...'
+                : webhookStatus?.matches_expected
+                ? 'সক্রিয় (Webhook যুক্ত)'
+                : webhookStatus?.configured
+                ? 'ভিন্ন URL-এ যুক্ত'
+                : 'চালু করা নেই'}
+            </strong>
+          </span>
+          {webhookStatus?.bot_username && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono text-slate-800">@{webhookStatus.bot_username}</span>
+            </>
+          )}
+          {typeof webhookStatus?.pending_update_count === 'number' && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="tabular-nums">Pending: {webhookStatus.pending_update_count}</span>
+            </>
+          )}
+        </div>
+
+        {webhookStatus?.last_error_message && (
+          <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900">
+            সর্বশেষ Webhook ত্রুটি: {webhookStatus.last_error_message}
+          </div>
+        )}
+
+        {webhookMsg && (
+          <div
+            className={`p-3 rounded-lg border flex items-start space-x-2 ${
+              webhookMsg.success
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-rose-50 border-rose-200 text-rose-800'
+            }`}
+          >
+            {webhookMsg.success ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            )}
+            <span>{webhookMsg.text}</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+            <p className="font-bold text-slate-800">শিক্ষার্থীরা যেসব কমান্ড ব্যবহার করতে পারবে</p>
+            <ul className="space-y-1 text-slate-600">
+              <li>
+                <code className="font-mono text-slate-900 font-semibold">/latest</code> — সর্বশেষ ৮টি নোটিশ
+              </li>
+              <li>
+                <code className="font-mono text-slate-900 font-semibold">/latest 10</code> — সর্বশেষ ৫–১০টি নোটিশ
+              </li>
+              <li>
+                <code className="font-mono text-slate-900 font-semibold">/notice আজিজুল</code> — কলেজ বা বিষয় দিয়ে খোঁজা
+              </li>
+              <li>
+                <code className="font-mono text-slate-900 font-semibold">/colleges</code> — সক্রিয় কলেজের তালিকা
+              </li>
+            </ul>
+          </div>
+
+          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+            <p className="font-bold text-slate-800">টেলিগ্রাম গ্রুপে ব্যবহারের নিয়ম</p>
+            <p className="text-slate-600 leading-relaxed">
+              বটটিকে যেকোনো টেলিগ্রাম গ্রুপ বা সুপারগ্রুপে যোগ করে <strong>Admin</strong> বানিয়ে দিন। এরপর গ্রুপের Chat ID (যেমন <code className="font-mono">-100...</code>) উপরে বা নির্দিষ্ট কলেজের এডিটে বসিয়ে দিলে নোটিশও যাবে এবং গ্রুপের সদস্যরা <code className="font-mono">/latest</code> বা <code className="font-mono">/notice</code> লিখে সাথে সাথে উত্তর পাবে।
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
     </div>
   );
 };

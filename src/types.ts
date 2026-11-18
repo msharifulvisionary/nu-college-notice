@@ -71,8 +71,20 @@ export interface TestRunSampleNotice {
   link: string;
 }
 
+export interface CollegeScanLogEntry {
+  college_id: string;
+  college_name: string;
+  notice_url?: string;
+  status: 'ok' | 'error';
+  new_notices: number;
+  sent_count: number;
+  error_message?: string | null;
+}
+
 export interface TestRunResult {
   mode?: 'test' | 'normal' | 'baseline';
+  trigger?: string;
+  duration_ms?: number;
   college_name?: string;
   notice_url?: string;
   parsed_count?: number;
@@ -82,6 +94,7 @@ export interface TestRunResult {
   new_notices?: number;
   sent_count?: number;
   failed_colleges?: number;
+  college_results?: CollegeScanLogEntry[];
   error?: {
     name?: string;
     message?: string;
@@ -96,6 +109,28 @@ export interface TestRunRecord {
   result: TestRunResult | null;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface ScanLogEntry extends TestRunRecord {
+  college_name?: string | null;
+}
+
+export interface ScanLogsResponse {
+  logs: ScanLogEntry[];
+  colleges_health: College[];
+}
+
+export interface TelegramWebhookStatus {
+  configured: boolean;
+  webhook_url: string;
+  expected_url: string;
+  matches_expected: boolean;
+  bot_username?: string | null;
+  bot_name?: string | null;
+  pending_update_count?: number;
+  last_error_message?: string | null;
+  last_error_date?: number | null;
+  message?: string;
 }
 
 export interface SystemStatus {

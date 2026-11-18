@@ -1249,7 +1249,7 @@ async function upsertNoticeRowsSafe(
 async function processCollege(
   college: CollegeRow,
   globalConfig: TelegramRuntimeConfig
-): Promise<{ newCount: number; sentCount: number }> {
+): Promise<{ newCount: number; sentCount: number; warningError?: string }> {
   console.log(`\n[College] Scraping ${college.name} (${college.notice_url})...`);
 
   const { notices: scrapedNotices } = await scrapeCollegeNotices(
@@ -1262,7 +1262,7 @@ async function processCollege(
     const noMatchMsg = 'নোটিশ বোর্ডে কোনো নোটিশ খুঁজে পাওয়া যায়নি (স্ট্রাকচার পরিবর্তিত হতে পারে)।';
     console.warn(`[College] No notices matched selector for ${college.name}`);
     await updateCollegeHealth(college, { ok: false, errorMessage: noMatchMsg }, globalConfig);
-    return { newCount: 0, sentCount: 0 };
+    return { newCount: 0, sentCount: 0, warningError: noMatchMsg };
   }
 
   // স্ক্র্যাপিং সফল হয়েছে -> হেলথ স্ট্যাটাস স্বাভাবিক করা হচ্ছে
@@ -1698,7 +1698,21 @@ async function saveAutoScanSettingsStatus(
   );
 }
 
+interface CollegeScanLogEntry {
+  college_id: string;
+  college_name: string;
+  notice_url: string;
+  status: 'ok' | 'error';
+  new_notices: number;
+  sent_count: number;
+  error_message?: string | null;
+}
+
+let activeNormalRunId = TEST_RUN_ID;
+let activeNormalTrigger = 'github_schedule';
+
 async function main() {
+  const startedAtMs = Date.now();
   console.log(`[Scraper] Notice check started at ${new Date().toISOString()} (mode=${SCRAPE_MODE})`);
 
   if (SCRAPE_MODE === 'test') {
@@ -1722,11 +1736,40 @@ async function main() {
     return;
   }
 
-  if (TEST_RUN_ID) {
+  // প্রতিটি normal স্ক্যানের জন্য (GitHub Schedule সহ) test_runs টেবিলে লগ সংরক্ষণ করা হবে
+  if (activeNormalRunId) {
+    const { data: existingRun } = await supabase
+      .from('test_runs')
+      .select('result')
+      .eq('id', activeNormalRunId)
+      .maybeSingle();
+
+    const existingTrigger = (existingRun?.result as { trigger?: string } | null)?.trigger;
+    if (existingTrigger) {
+      activeNormalTrigger = existingTrigger;
+    } else {
+      activeNormalTrigger = 'manual';
+    }
+
     await supabase
       .from('test_runs')
       .update({ status: 'running', updated_at: new Date().toISOString() })
-      .eq('id', TEST_RUN_ID);
+      .eq('id', activeNormalRunId);
+  } else {
+    activeNormalTrigger = 'github_schedule';
+    const { data: insertedRun } = await supabase
+      .from('test_runs')
+      .insert({
+        college_id: null,
+        status: 'running',
+        result: { mode: 'normal', trigger: activeNormalTrigger },
+      })
+      .select('id')
+      .single();
+
+    if (insertedRun?.id) {
+      activeNormalRunId = insertedRun.id;
+    }
   }
 
   const { data: colleges, error: collegesError } = await supabase
@@ -1737,7 +1780,7 @@ async function main() {
   if (collegesError) {
     console.error('[Scraper] Failed to load active colleges:', collegesError.message);
     await saveAutoScanSettingsStatus('error', collegesError.message);
-    if (TEST_RUN_ID) {
+    if (activeNormalRunId) {
       await supabase
         .from('test_runs')
         .update({
@@ -1745,10 +1788,12 @@ async function main() {
           updated_at: new Date().toISOString(),
           result: {
             mode: 'normal',
+            trigger: activeNormalTrigger,
+            duration_ms: Date.now() - startedAtMs,
             error: { name: 'DatabaseError', message: collegesError.message },
           },
         })
-        .eq('id', TEST_RUN_ID);
+        .eq('id', activeNormalRunId);
     }
     process.exit(1);
   }
@@ -1759,17 +1804,48 @@ async function main() {
   let totalNew = 0;
   let totalSent = 0;
   let failedColleges = 0;
+  const collegeResults: CollegeScanLogEntry[] = [];
 
   for (const college of activeColleges) {
     try {
-      const { newCount, sentCount } = await processCollege(college, globalConfig);
+      const { newCount, sentCount, warningError } = await processCollege(college, globalConfig);
       totalNew += newCount;
       totalSent += sentCount;
+      if (warningError) {
+        failedColleges += 1;
+        collegeResults.push({
+          college_id: college.id,
+          college_name: college.name,
+          notice_url: college.notice_url,
+          status: 'error',
+          new_notices: newCount,
+          sent_count: sentCount,
+          error_message: warningError,
+        });
+      } else {
+        collegeResults.push({
+          college_id: college.id,
+          college_name: college.name,
+          notice_url: college.notice_url,
+          status: 'ok',
+          new_notices: newCount,
+          sent_count: sentCount,
+        });
+      }
     } catch (err: unknown) {
       failedColleges += 1;
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[Error] ${college.name}: ${message}`);
       await updateCollegeHealth(college, { ok: false, errorMessage: message }, globalConfig);
+      collegeResults.push({
+        college_id: college.id,
+        college_name: college.name,
+        notice_url: college.notice_url,
+        status: 'error',
+        new_notices: 0,
+        sent_count: 0,
+        error_message: message,
+      });
     }
   }
 
@@ -1778,7 +1854,7 @@ async function main() {
   const summaryMsg = `${activeColleges.length} টি কলেজ চেক হয়েছে · নতুন নোটিশ ${totalNew} টি · টেলিগ্রাম প্রেরিত ${totalSent} টি`;
   await saveAutoScanSettingsStatus(failedColleges > 0 ? 'partial_error' : 'success', summaryMsg);
 
-  if (TEST_RUN_ID) {
+  if (activeNormalRunId) {
     await supabase
       .from('test_runs')
       .update({
@@ -1786,13 +1862,16 @@ async function main() {
         updated_at: new Date().toISOString(),
         result: {
           mode: 'normal',
+          trigger: activeNormalTrigger,
+          duration_ms: Date.now() - startedAtMs,
           total_colleges: activeColleges.length,
           new_notices: totalNew,
           sent_count: totalSent,
           failed_colleges: failedColleges,
+          college_results: collegeResults,
         },
       })
-      .eq('id', TEST_RUN_ID);
+      .eq('id', activeNormalRunId);
   }
 
   console.log(
@@ -1802,7 +1881,7 @@ async function main() {
 
 main().catch(async (err) => {
   console.error('[Scraper Fatal Error]:', err);
-  if (TEST_RUN_ID) {
+  if (activeNormalRunId) {
     await supabase
       .from('test_runs')
       .update({
@@ -1810,13 +1889,14 @@ main().catch(async (err) => {
         updated_at: new Date().toISOString(),
         result: {
           mode: SCRAPE_MODE === 'test' ? 'test' : SCRAPE_MODE === 'baseline' ? 'baseline' : 'normal',
+          trigger: activeNormalTrigger,
           error: {
             name: err instanceof Error ? err.name : 'FatalError',
             message: err instanceof Error ? err.message : String(err),
           },
         },
       })
-      .eq('id', TEST_RUN_ID);
+      .eq('id', activeNormalRunId);
   }
   process.exit(1);
 });
