@@ -532,34 +532,54 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
-            <p className="font-bold text-slate-800">শিক্ষার্থীরা যেসব কমান্ড ব্যবহার করতে পারবে</p>
+            <p className="font-bold text-slate-800">শিক্ষার্থীদের কমান্ড ও ইনলাইন বাটন</p>
             <ul className="space-y-1 text-slate-600">
               <li>
-                <code className="font-mono text-slate-900 font-semibold">/latest</code> — সর্বশেষ ৮টি নোটিশ
-              </li>
-              <li>
-                <code className="font-mono text-slate-900 font-semibold">/latest 10</code> — সর্বশেষ ৫–১০টি নোটিশ
+                <code className="font-mono text-slate-900 font-semibold">/latest</code> বা{' '}
+                <code className="font-mono text-slate-900 font-semibold">/today</code> — সর্বশেষ বা আজকের নোটিশ
               </li>
               <li>
                 <code className="font-mono text-slate-900 font-semibold">/notice আজিজুল</code> — কলেজ বা বিষয় দিয়ে খোঁজা
               </li>
               <li>
-                <code className="font-mono text-slate-900 font-semibold">/subscribe আজিজুল</code> — পার্সোনাল নোটিশ অ্যালার্ট চালু
+                <code className="font-mono text-slate-900 font-semibold">/routine</code> ·{' '}
+                <code className="font-mono text-slate-900 font-semibold">/form</code> ·{' '}
+                <code className="font-mono text-slate-900 font-semibold">/result</code> ·{' '}
+                <code className="font-mono text-slate-900 font-semibold">/admission</code> — ক্যাটাগরি শর্টকাট
               </li>
               <li>
-                <code className="font-mono text-slate-900 font-semibold">/subscriptions</code> /{' '}
-                <code className="font-mono text-slate-900 font-semibold">/unsubscribe</code> — সাবস্ক্রিপশন পরিচালনা
+                <code className="font-mono text-slate-900 font-semibold">/deadlines</code> — ফরম পূরণ/ভর্তির শেষ তারিখ
               </li>
               <li>
-                <code className="font-mono text-slate-900 font-semibold">/colleges</code> — সক্রিয় কলেজের তালিকা
+                <code className="font-mono text-slate-900 font-semibold">/subscribe আজিজুল</code> ·{' '}
+                <code className="font-mono text-slate-900 font-semibold">/subscriptions</code> ·{' '}
+                <code className="font-mono text-slate-900 font-semibold">/unsubscribe</code>
+              </li>
+              <li>
+                <code className="font-mono text-slate-900 font-semibold">/colleges</code> ·{' '}
+                <code className="font-mono text-slate-900 font-semibold">/request কলেজের নাম ও লিংক</code>
               </li>
             </ul>
           </div>
 
-          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
-            <p className="font-bold text-slate-800">টেলিগ্রাম গ্রুপে ব্যবহারের নিয়ম</p>
-            <p className="text-slate-600 leading-relaxed">
-              বটটিকে যেকোনো টেলিগ্রাম গ্রুপ বা সুপারগ্রুপে যোগ করে <strong>Admin</strong> বানিয়ে দিন। এরপর গ্রুপের Chat ID (যেমন <code className="font-mono">-100...</code>) উপরে বা নির্দিষ্ট কলেজের এডিটে কমা (,) দিয়ে বসিয়ে দিলে একসাথে একাধিক গ্রুপে নোটিশ যাবে এবং গ্রুপের সদস্যরা <code className="font-mono">/latest</code>, <code className="font-mono">/notice</code> বা ইনবক্সে <code className="font-mono">/subscribe</code> ব্যবহার করতে পারবে।
+          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+            <div>
+              <p className="font-bold text-slate-800">এডমিন কন্ট্রোল কমান্ড (শুধু ডিফল্ট Chat ID-তে)</p>
+              <ul className="space-y-1 text-slate-600 mt-1">
+                <li>
+                  <code className="font-mono text-slate-900 font-semibold">/status</code> — সব কলেজের স্ক্যান ও হেলথ অবস্থা
+                </li>
+                <li>
+                  <code className="font-mono text-slate-900 font-semibold">/scan</code> — এখনই ম্যানুয়াল স্ক্যান শুরু
+                </li>
+                <li>
+                  <code className="font-mono text-slate-900 font-semibold">/digest</code> ·{' '}
+                  <code className="font-mono text-slate-900 font-semibold">/stats</code> — ডাইজেস্ট ও সাবস্ক্রাইবার পরিসংখ্যান
+                </li>
+              </ul>
+            </div>
+            <p className="text-slate-500 text-[11px] leading-relaxed border-t border-slate-200 pt-1.5">
+              গ্রুপে বটকে <strong>Admin</strong> বানিয়ে কমা (,) দিয়ে একাধিক Chat ID বসালে সব গ্রুপে নোটিশ ও ইনলাইন বাটন কাজ করবে।
             </p>
           </div>
         </div>

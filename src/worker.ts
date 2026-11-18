@@ -795,24 +795,14 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
   });
 }
 
-// এডমিন থেকে তাৎক্ষণিক আজকের ডেইলি ডাইজেস্ট পাঠানোর হ্যান্ডলার
-async function handleSendDailyDigest(env: Env): Promise<Response> {
-  const settings = await fetchTelegramSettings(env);
-  if (!settings.ok) {
-    return jsonResponse({ ok: false, error: settings.errorMessage }, 500);
-  }
-
-  if (!settings.botToken || !settings.chatId) {
-    return jsonResponse(
-      {
-        ok: false,
-        error: 'ডাটাবেজে Telegram Bot Token বা Chat ID সেভ করা নেই। আগে সেটিংস সেভ করুন।',
-      },
-      400
-    );
-  }
-
-  // বাংলাদেশ সময় (Asia/Dhaka = UTC+6) অনুযায়ী আজকের শুরুর ISO সময় বের করা হচ্ছে
+async function buildDailyDigestData(env: Env): Promise<{
+  ok: boolean;
+  text?: string;
+  dhakaDate?: string;
+  activeCollegesCount?: number;
+  todayNoticesCount?: number;
+  error?: string;
+}> {
   const now = new Date();
   const dhakaDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' }).format(now);
   const startOfDhakaDayUtc = new Date(`${dhakaDate}T00:00:00+06:00`).toISOString();
@@ -829,16 +819,13 @@ async function handleSendDailyDigest(env: Env): Promise<Response> {
   ]);
 
   if (!collegesRes.ok || !noticesRes.ok) {
-    return jsonResponse(
-      {
-        ok: false,
-        error:
-          collegesRes.errorMessage ||
-          noticesRes.errorMessage ||
-          'ডাইজেস্টের জন্য ডাটা সংগ্রহ করা যায়নি।',
-      },
-      500
-    );
+    return {
+      ok: false,
+      error:
+        collegesRes.errorMessage ||
+        noticesRes.errorMessage ||
+        'ডাইজেস্টের জন্য ডাটা সংগ্রহ করা যায়নি।',
+    };
   }
 
   const allColleges = collegesRes.data || [];
@@ -877,7 +864,38 @@ async function handleSendDailyDigest(env: Env): Promise<Response> {
     }
   }
 
-  const digestText = lines.join('\n');
+  return {
+    ok: true,
+    text: lines.join('\n'),
+    dhakaDate,
+    activeCollegesCount: activeColleges.length,
+    todayNoticesCount: todayNotices.length,
+  };
+}
+
+// এডমিন থেকে তাৎক্ষণিক আজকের ডেইলি ডাইজেস্ট পাঠানোর হ্যান্ডলার
+async function handleSendDailyDigest(env: Env): Promise<Response> {
+  const settings = await fetchTelegramSettings(env);
+  if (!settings.ok) {
+    return jsonResponse({ ok: false, error: settings.errorMessage }, 500);
+  }
+
+  if (!settings.botToken || !settings.chatId) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: 'ডাটাবেজে Telegram Bot Token বা Chat ID সেভ করা নেই। আগে সেটিংস সেভ করুন।',
+      },
+      400
+    );
+  }
+
+  const digestData = await buildDailyDigestData(env);
+  if (!digestData.ok || !digestData.text) {
+    return jsonResponse({ ok: false, error: digestData.error || 'ডাইজেস্ট তৈরি করা যায়নি।' }, 500);
+  }
+
+  const digestText = digestData.text;
   const chatIds = parseWorkerChatIdList(settings.chatId);
   if (chatIds.length === 0) {
     return jsonResponse({ ok: false, error: 'সঠিক Telegram Chat ID পাওয়া যায়নি।' }, 400);
@@ -922,11 +940,11 @@ async function handleSendDailyDigest(env: Env): Promise<Response> {
 
   return jsonResponse({
     ok: true,
-    message: `আজকের ডেইলি ডাইজেস্ট (${todayNotices.length} টি নোটিশ) সফলভাবে ${sentCount}টি টেলিগ্রাম চ্যাটে পাঠানো হয়েছে!`,
+    message: `আজকের ডেইলি ডাইজেস্ট (${digestData.todayNoticesCount || 0} টি নোটিশ) সফলভাবে ${sentCount}টি টেলিগ্রাম চ্যাটে পাঠানো হয়েছে!`,
     summary: {
-      date: dhakaDate,
-      active_colleges: activeColleges.length,
-      total_notices_today: todayNotices.length,
+      date: digestData.dhakaDate,
+      active_colleges: digestData.activeCollegesCount || 0,
+      total_notices_today: digestData.todayNoticesCount || 0,
     },
   });
 }
@@ -1795,18 +1813,19 @@ async function fetchSortedNoticesForBot(env: Env): Promise<
     title: string;
     link: string;
     date: string;
+    createdAt: string;
     sortMs: number;
   }>
 > {
   let res = await supabaseRest<WebhookNoticeRow[]>(
     env,
-    'notices?select=id,college_id,title,link,date,published_at,created_at,colleges(name)&order=published_at.desc.nullslast,created_at.desc&limit=120'
+    'notices?select=id,college_id,title,link,date,published_at,created_at,colleges(name)&order=published_at.desc.nullslast,created_at.desc&limit=150'
   );
 
   if (!res.ok && res.errorMessage && /published_at/i.test(res.errorMessage)) {
     res = await supabaseRest<WebhookNoticeRow[]>(
       env,
-      'notices?select=id,college_id,title,link,date,created_at,colleges(name)&order=created_at.desc&limit=120'
+      'notices?select=id,college_id,title,link,date,created_at,colleges(name)&order=created_at.desc&limit=150'
     );
   }
 
@@ -1831,12 +1850,83 @@ async function fetchSortedNoticesForBot(env: Env): Promise<
       title: row.title,
       link: row.link,
       date: row.date || '',
+      createdAt: row.created_at || '',
       sortMs,
     };
   });
 
   items.sort((a, b) => b.sortMs - a.sortMs);
   return items;
+}
+
+function buildNoticeQuickKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '📰 আজকের নোটিশ', callback_data: 'cmd:today' },
+        { text: '📝 ফরম পূরণ', callback_data: 'cmd:form' },
+      ],
+      [
+        { text: '📅 পরীক্ষা ও রুটিন', callback_data: 'cmd:routine' },
+        { text: '⏳ ডেডলাইন', callback_data: 'cmd:deadlines' },
+      ],
+    ],
+  };
+}
+
+function matchesBotCategory(
+  title: string,
+  category: 'routine' | 'form' | 'result' | 'admission'
+): boolean {
+  const lower = title.toLowerCase();
+  if (category === 'form') {
+    return /ফরম|ফর্ম|form\s*fill|form\s*up/i.test(lower);
+  }
+  if (category === 'routine') {
+    return /পরীক্ষা|রুটিন|সময়সূচ|সময়সূচ|exam|routine|schedule|স্থগিত|সংশোধিত/i.test(lower);
+  }
+  if (category === 'result') {
+    return /ফলাফল|ফল|রেজাল্ট|result/i.test(lower);
+  }
+  return /ভর্তি|admission|মেধা\s*তালিকা|merit/i.test(lower);
+}
+
+function formatDhakaDateOnly(ms: number): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' }).format(new Date(ms));
+  } catch {
+    return '';
+  }
+}
+
+function formatDhakaDateTime(iso?: string | null): string {
+  if (!iso) return 'তথ্য নেই';
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return 'তথ্য নেই';
+  try {
+    return new Intl.DateTimeFormat('bn-BD', {
+      timeZone: 'Asia/Dhaka',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(new Date(ms));
+  } catch {
+    return iso;
+  }
+}
+
+async function answerTelegramCallbackQuery(
+  botToken: string,
+  callbackQueryId: string,
+  text?: string
+): Promise<void> {
+  await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      callback_query_id: callbackQueryId,
+      ...(text ? { text } : {}),
+    }),
+  }).catch(() => {});
 }
 
 async function sendTelegramBotReply(
@@ -1846,6 +1936,7 @@ async function sendTelegramBotReply(
     text: string;
     message_thread_id?: number;
     reply_to_message_id?: number;
+    reply_markup?: unknown;
   }
 ): Promise<void> {
   const body: Record<string, unknown> = {
@@ -1860,6 +1951,9 @@ async function sendTelegramBotReply(
   if (payload.reply_to_message_id) {
     body.reply_to_message_id = payload.reply_to_message_id;
   }
+  if (payload.reply_markup) {
+    body.reply_markup = payload.reply_markup;
+  }
 
   await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
@@ -1871,7 +1965,7 @@ async function sendTelegramBotReply(
 async function handleTelegramWebhook(request: Request, env: Env): Promise<Response> {
   const settingsRes = await supabaseRest<SettingRow[]>(
     env,
-    'settings?key=in.(telegram_bot_token,telegram_webhook_secret)&select=key,value'
+    'settings?key=in.(telegram_bot_token,telegram_webhook_secret,telegram_chat_id)&select=key,value'
   );
 
   if (!settingsRes.ok || !settingsRes.data) {
@@ -1880,9 +1974,11 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
 
   let botToken = '';
   let expectedSecret = '';
+  let adminChatIdsRaw = '';
   for (const row of settingsRes.data) {
     if (row.key === 'telegram_bot_token') botToken = (row.value || '').trim();
     if (row.key === 'telegram_webhook_secret') expectedSecret = (row.value || '').trim();
+    if (row.key === 'telegram_chat_id') adminChatIdsRaw = (row.value || '').trim();
   }
 
   if (expectedSecret) {
@@ -1903,19 +1999,29 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
     created_at?: string;
   }
 
+  interface WorkerUpcomingDeadline {
+    college_name: string;
+    title: string;
+    link: string;
+    deadline_date: string;
+  }
+
+  interface TelegramMessageObject {
+    message_id?: number;
+    message_thread_id?: number;
+    text?: string;
+    from?: { id?: number | string; first_name?: string; username?: string };
+    chat?: { id?: number | string; type?: string; title?: string };
+  }
+
   let update: {
-    message?: {
-      message_id?: number;
-      message_thread_id?: number;
-      text?: string;
-      from?: { first_name?: string; username?: string };
-      chat?: { id?: number | string; type?: string; title?: string };
-    };
-    channel_post?: {
-      message_id?: number;
-      message_thread_id?: number;
-      text?: string;
-      chat?: { id?: number | string; type?: string; title?: string };
+    message?: TelegramMessageObject;
+    channel_post?: TelegramMessageObject;
+    callback_query?: {
+      id: string;
+      from?: { id?: number | string; first_name?: string; username?: string };
+      message?: TelegramMessageObject;
+      data?: string;
     };
   };
 
@@ -1925,46 +2031,479 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
     return jsonResponse({ ok: true });
   }
 
-  const msg = update.message || update.channel_post;
-  const rawText = (msg?.text || '').trim();
+  let msg: TelegramMessageObject | undefined;
+  let command = '';
+  let rawArg = '';
+  let fromUser: { id?: number | string; first_name?: string; username?: string } | undefined;
+  let fromCallback = false;
+
+  if (update.callback_query?.data && update.callback_query.message) {
+    fromCallback = true;
+    msg = update.callback_query.message;
+    fromUser = update.callback_query.from;
+    await answerTelegramCallbackQuery(botToken, update.callback_query.id);
+    const cbMatch = update.callback_query.data.match(/^cmd:([a-zA-Z0-9_]+)(?:\s+([\s\S]*))?$/);
+    if (!cbMatch) {
+      return jsonResponse({ ok: true });
+    }
+    command = cbMatch[1].toLowerCase();
+    rawArg = (cbMatch[2] || '').trim();
+  } else {
+    msg = update.message || update.channel_post;
+    fromUser = update.message?.from;
+    const rawText = (msg?.text || '').trim();
+    if (!msg || !rawText || !rawText.startsWith('/')) {
+      return jsonResponse({ ok: true });
+    }
+    const cmdMatch = rawText.match(/^\/([a-zA-Z0-9_]+)(?:@[a-zA-Z0-9_]+)?(?:\s+([\s\S]*))?$/);
+    if (!cmdMatch) {
+      return jsonResponse({ ok: true });
+    }
+    command = cmdMatch[1].toLowerCase();
+    rawArg = (cmdMatch[2] || '').trim();
+  }
+
   const chatId = msg?.chat?.id;
-
-  if (!msg || !rawText || chatId === undefined || chatId === null || !rawText.startsWith('/')) {
+  if (!msg || chatId === undefined || chatId === null) {
     return jsonResponse({ ok: true });
   }
 
-  const cmdMatch = rawText.match(/^\/([a-zA-Z0-9_]+)(?:@[a-zA-Z0-9_]+)?(?:\s+([\s\S]*))?$/);
-  if (!cmdMatch) {
-    return jsonResponse({ ok: true });
-  }
-
-  const command = cmdMatch[1].toLowerCase();
-  const rawArg = (cmdMatch[2] || '').trim();
   const isGroup = msg.chat?.type === 'group' || msg.chat?.type === 'supergroup';
-  const replyToMessageId = isGroup && msg.message_id ? msg.message_id : undefined;
+  const replyToMessageId = !fromCallback && isGroup && msg.message_id ? msg.message_id : undefined;
+
+  const adminChatList = parseWorkerChatIdList(adminChatIdsRaw);
+  const adminChatSet = new Set(adminChatList);
+  const isAdminSender =
+    adminChatSet.has(String(chatId)) ||
+    (fromUser?.id !== undefined && adminChatSet.has(String(fromUser.id)));
+
+  const appOrigin = new URL(request.url).origin;
 
   if (command === 'start' || command === 'help') {
     const helpLines = [
       '🔔 <b>জাতীয় বিশ্ববিদ্যালয় ও কলেজ নোটিশ বট</b>',
       '',
-      'নিচের কমান্ডগুলো ব্যবহার করে যেকোনো সময় সর্বশেষ নোটিশ দেখতে ও অ্যালার্ট চালু করতে পারবেন:',
-      '• /latest — সর্বশেষ ৮টি নোটিশ দেখুন',
-      '• /latest 10 — সর্বশেষ ১০টি নোটিশ দেখুন (৫–১০)',
+      '<b>শিক্ষার্থীদের কমান্ডসমূহ:</b>',
+      '• /latest — সর্বশেষ ৮টি নোটিশ দেখুন (বা <code>/latest 10</code>)',
+      '• /today — আজ সারাদিনে প্রকাশিত নতুন নোটিশ',
       '• /notice &lt;কলেজ বা বিষয়&gt; — নির্দিষ্ট কলেজ বা কীওয়ার্ড দিয়ে খুঁজুন',
-      '  <i>উদাহরণ:</i> <code>/notice ফরম</code> বা <code>/notice আজিজুল</code>',
-      '• /subscribe &lt;কলেজ বা বিষয়&gt; — পার্সোনাল নোটিশ অ্যালার্ট চালু করুন',
-      '  <i>উদাহরণ:</i> <code>/subscribe আজিজুল</code> বা <code>/subscribe ফরম</code>',
-      '• /subscriptions — আপনার চালু থাকা সাবস্ক্রিপশন দেখুন',
-      '• /unsubscribe [কীওয়ার্ড] — সাবস্ক্রিপশন বাতিল করুন',
-      '• /colleges — সংযুক্ত সক্রিয় কলেজগুলোর তালিকা দেখুন',
-      '• /help — কমান্ড সহায়িকা দেখুন',
+      '• /routine — পরীক্ষা ও রুটিন সংক্রান্ত নোটিশ',
+      '• /form — ফরম পূরণ সংক্রান্ত নোটিশ',
+      '• /result — ফলাফল সংক্রান্ত নোটিশ',
+      '• /admission — ভর্তি সংক্রান্ত নোটিশ',
+      '• /deadlines — আসন্ন ফরম পূরণ/ভর্তির শেষ তারিখ',
+      '• /subscribe &lt;কলেজ বা বিষয়&gt; — পার্সোনাল ইনবক্স অ্যালার্ট',
+      '• /subscriptions · /unsubscribe — সাবস্ক্রিপশন পরিচালনা',
+      '• /colleges — সংযুক্ত সক্রিয় কলেজগুলোর তালিকা',
+      '• /request &lt;কলেজের নাম ও লিংক&gt; — নতুন কলেজ যুক্ত করার অনুরোধ',
     ];
+
+    if (isAdminSender) {
+      helpLines.push(
+        '',
+        '<b>🔐 এডমিন কন্ট্রোল কমান্ড:</b>',
+        '• /status — সব কলেজের স্ক্যান ও হেলথ অবস্থা',
+        '• /scan — এখনই সব কলেজের ম্যানুয়াল স্ক্যান শুরু',
+        '• /digest — আজকের ডেইলি ডাইজেস্ট রিপোর্ট',
+        '• /stats — সাবস্ক্রাইবার ও সিস্টেম পরিসংখ্যান'
+      );
+    }
 
     await sendTelegramBotReply(botToken, {
       chat_id: chatId,
       text: helpLines.join('\n'),
       message_thread_id: msg.message_thread_id,
       reply_to_message_id: replyToMessageId,
+      reply_markup: buildNoticeQuickKeyboard(),
+    });
+    return jsonResponse({ ok: true });
+  }
+
+  // এডমিন কন্ট্রোল কমান্ডসমূহ (/status, /health, /scan, /digest, /stats)
+  if (command === 'status' || command === 'health' || command === 'scan' || command === 'digest' || command === 'stats') {
+    if (!isAdminSender) {
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: '⛔ এই কমান্ডটি শুধুমাত্র বট এডমিনের জন্য সংরক্ষিত।',
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    if (command === 'status' || command === 'health') {
+      const [automation, colRes] = await Promise.all([
+        readAutomationStatus(env),
+        supabaseRest<CollegeRecord[]>(
+          env,
+          'colleges?select=id,name,is_active,last_status,consecutive_failures,last_error,last_checked_at&order=name.asc'
+        ),
+      ]);
+
+      const colleges = colRes.ok && colRes.data ? colRes.data : [];
+      const activeColleges = colleges.filter((c) => c.is_active);
+      const failingColleges = activeColleges.filter((c) => c.last_status === 'error');
+      const healthyCount = activeColleges.length - failingColleges.length;
+
+      const lines = [
+        '🩺 <b>সিস্টেম হেলথ ও অটো-স্ক্যান স্ট্যাটাস</b>',
+        '',
+        `⚙️ অটো-স্ক্যান (২০ মি.): ${automation.auto_scan_enabled ? '✅ চালু' : '⏸️ বন্ধ'}`,
+        `🕒 সর্বশেষ স্ক্যান: ${escapeTelegramHtml(formatDhakaDateTime(automation.last_auto_scan_at))}`,
+      ];
+      if (automation.last_auto_scan_message) {
+        lines.push(`📝 সারাংশ: ${escapeTelegramHtml(automation.last_auto_scan_message)}`);
+      }
+      lines.push(
+        '',
+        `🏫 সক্রিয় কলেজ: ${toBengaliNumber(activeColleges.length)} টি (সুস্থ: ${toBengaliNumber(healthyCount)} টি · সমস্যা: ${toBengaliNumber(failingColleges.length)} টি)`
+      );
+
+      if (failingColleges.length > 0) {
+        lines.push('', '⚠️ <b>সমস্যাযুক্ত কলেজসমূহ:</b>');
+        for (const fc of failingColleges.slice(0, 8)) {
+          lines.push(
+            `• <b>${escapeTelegramHtml(fc.name)}</b> (টানা ${toBengaliNumber(fc.consecutive_failures || 1)} বার ব্যর্থ)` +
+              (fc.last_error ? `\n  <i>কারণ: ${escapeTelegramHtml(fc.last_error.slice(0, 100))}</i>` : '')
+          );
+        }
+      } else if (activeColleges.length > 0) {
+        lines.push('', '✅ সবগুলো সক্রিয় কলেজের নোটিশ বোর্ড স্বাভাবিকভাবে কাজ করছে।');
+      }
+
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: lines.join('\n'),
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    if (command === 'scan') {
+      const githubToken = (env.GITHUB_TOKEN || '').trim();
+      const githubRepo = normalizeGithubRepo(env.GITHUB_REPO);
+      if (!githubToken || !githubRepo) {
+        await sendTelegramBotReply(botToken, {
+          chat_id: chatId,
+          text: '⚠️ Cloudflare Worker-এ GITHUB_TOKEN বা GITHUB_REPO কনফিগার করা নেই।',
+          message_thread_id: msg.message_thread_id,
+          reply_to_message_id: replyToMessageId,
+        });
+        return jsonResponse({ ok: true });
+      }
+
+      const createRunRes = await supabaseRest<TestRunRow[]>(env, 'test_runs', {
+        method: 'POST',
+        prefer: 'return=representation',
+        body: [
+          {
+            college_id: null,
+            status: 'pending',
+            result: { mode: 'normal', trigger: 'telegram_admin' },
+          },
+        ],
+      });
+
+      const runId = createRunRes.ok && createRunRes.data?.[0]?.id ? createRunRes.data[0].id : '';
+      const dispatchRes = await dispatchScraperWorkflow(env, runId, {
+        mode: 'normal',
+        college_id: '',
+        test_run_id: runId,
+      });
+
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: dispatchRes.ok
+          ? '🚀 <b>সব সক্রিয় কলেজের ম্যানুয়াল স্ক্যান শুরু হয়েছে!</b>\nনতুন নোটিশ পেলে টেলিগ্রামে চলে আসবে এবং হেলথ লগ ড্যাশবোর্ডে ফলাফল দেখতে পারবেন।'
+          : '❌ GitHub Actions স্ক্যান শুরু করা যায়নি। ড্যাশবোর্ড বা Worker লগ যাচাই করুন।',
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    if (command === 'digest') {
+      const digestData = await buildDailyDigestData(env);
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text:
+          digestData.ok && digestData.text
+            ? digestData.text
+            : `❌ ডাইজেস্ট তৈরি করা যায়নি: ${escapeTelegramHtml(digestData.error || 'অজানা ত্রুটি')}`,
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    if (command === 'stats') {
+      const [colRes, noticesRes, settingsExtraRes] = await Promise.all([
+        supabaseRest<CollegeRecord[]>(env, 'colleges?select=id,is_active'),
+        supabaseRest<Array<{ id: string }>>(env, 'notices?select=id&limit=1000'),
+        supabaseRest<SettingRow[]>(
+          env,
+          'settings?key=in.(telegram_subscriptions,upcoming_deadlines)&select=key,value'
+        ),
+      ]);
+
+      const allColleges = colRes.ok && colRes.data ? colRes.data : [];
+      const activeCount = allColleges.filter((c) => c.is_active).length;
+      const noticesCount = noticesRes.ok && noticesRes.data ? noticesRes.data.length : 0;
+
+      let subs: WorkerSubscriptionItem[] = [];
+      let deadlines: WorkerUpcomingDeadline[] = [];
+      if (settingsExtraRes.ok && settingsExtraRes.data) {
+        for (const r of settingsExtraRes.data) {
+          if (r.key === 'telegram_subscriptions' && r.value) {
+            try {
+              const p = JSON.parse(r.value);
+              if (Array.isArray(p)) subs = p;
+            } catch {
+              // ignore
+            }
+          }
+          if (r.key === 'upcoming_deadlines' && r.value) {
+            try {
+              const p = JSON.parse(r.value);
+              if (Array.isArray(p)) deadlines = p;
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+
+      const kwFreq = new Map<string, number>();
+      for (const s of subs) {
+        for (const kw of s.keywords || []) {
+          const cleanKw = String(kw || '').trim();
+          if (cleanKw) kwFreq.set(cleanKw, (kwFreq.get(cleanKw) || 0) + 1);
+        }
+      }
+      const topKeywords = Array.from(kwFreq.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5);
+
+      const lines = [
+        '📈 <b>সিস্টেম ও সাবস্ক্রাইবার পরিসংখ্যান</b>',
+        '',
+        `🏫 মোট কলেজ: ${toBengaliNumber(allColleges.length)} টি (সক্রিয়: ${toBengaliNumber(activeCount)} টি)`,
+        `📰 সংগৃহীত নোটিশ: ${toBengaliNumber(noticesCount)}${noticesCount >= 1000 ? '+' : ''} টি`,
+        `⭐ পার্সোনাল সাবস্ক্রাইবার: ${toBengaliNumber(subs.length)} জন`,
+        `⏳ চলমান ডেডলাইন ট্র্যাক: ${toBengaliNumber(deadlines.length)} টি`,
+      ];
+
+      if (topKeywords.length > 0) {
+        lines.push('', '🔥 <b>জনপ্রিয় সাবস্ক্রিপশন কীওয়ার্ড:</b>');
+        for (const [kw, cnt] of topKeywords) {
+          lines.push(`• <code>${escapeTelegramHtml(kw)}</code> (${toBengaliNumber(cnt)} জন)`);
+        }
+      }
+
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: lines.join('\n'),
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+  }
+
+  // শিক্ষার্থীর নতুন কলেজ যোগ করার অনুরোধ (/request)
+  if (command === 'request') {
+    if (!rawArg) {
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text:
+          '📩 <b>নতুন কলেজ যোগ করার অনুরোধ বা মতামত পাঠাতে লিখুন:</b>\n\n' +
+          '<code>/request কলেজের নাম এবং নোটিশ বোর্ড লিংক</code>\n' +
+          '<i>উদাহরণ:</i> <code>/request ঢাকা কলেজ https://dhakacollege.edu.bd/notices</code>',
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    const requesterName =
+      fromUser?.first_name ||
+      (fromUser?.username ? `@${fromUser.username}` : '') ||
+      msg.chat?.title ||
+      `Chat ${chatId}`;
+    const requesterHandle = fromUser?.username ? ` (@${fromUser.username})` : '';
+    const adminAlertText =
+      `📩 <b>নতুন কলেজ অনুরোধ / মতামত</b>\n\n` +
+      `👤 প্রেরক: <b>${escapeTelegramHtml(requesterName)}</b>${escapeTelegramHtml(requesterHandle)}\n` +
+      `🆔 Chat ID: <code>${escapeTelegramHtml(String(chatId))}</code>\n\n` +
+      `💬 বার্তা:\n${escapeTelegramHtml(rawArg)}`;
+
+    for (const adminCid of adminChatList) {
+      await sendTelegramBotReply(botToken, {
+        chat_id: adminCid,
+        text: adminAlertText,
+      });
+    }
+
+    await sendTelegramBotReply(botToken, {
+      chat_id: chatId,
+      text: '✅ আপনার অনুরোধটি এডমিনের কাছে সফলভাবে পাঠানো হয়েছে। ধন্যবাদ!',
+      message_thread_id: msg.message_thread_id,
+      reply_to_message_id: replyToMessageId,
+    });
+    return jsonResponse({ ok: true });
+  }
+
+  // আসন্ন ফরম পূরণ / ভর্তির শেষ তারিখ (/deadlines)
+  if (command === 'deadlines' || command === 'deadline') {
+    const dlRes = await supabaseRest<SettingRow[]>(
+      env,
+      'settings?key=eq.upcoming_deadlines&select=key,value'
+    );
+    let deadlines: WorkerUpcomingDeadline[] = [];
+    if (dlRes.ok && dlRes.data?.[0]?.value) {
+      try {
+        const parsedDl = JSON.parse(dlRes.data[0].value);
+        if (Array.isArray(parsedDl)) deadlines = parsedDl;
+      } catch {
+        deadlines = [];
+      }
+    }
+
+    const todayDhaka = formatDhakaDateOnly(Date.now());
+    const todayMs = Date.parse(`${todayDhaka}T00:00:00+06:00`);
+
+    const activeDeadlines = deadlines
+      .map((d) => {
+        const dlMs = Date.parse(`${d.deadline_date}T00:00:00+06:00`);
+        const daysLeft = Number.isNaN(dlMs)
+          ? -999
+          : Math.round((dlMs - todayMs) / (24 * 60 * 60 * 1000));
+        return { ...d, daysLeft };
+      })
+      .filter((d) => d.daysLeft >= 0)
+      .sort((a, b) => a.daysLeft - b.daysLeft)
+      .slice(0, 10);
+
+    if (activeDeadlines.length === 0) {
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: 'ℹ️ এই মুহূর্তে কোনো আসন্ন ফরম পূরণ বা ভর্তির শেষ তারিখ ডাটাবেজে সংরক্ষিত নেই।',
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+        reply_markup: buildNoticeQuickKeyboard(),
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    const formattedDeadlines = activeDeadlines.map((item, idx) => {
+      const remLabel =
+        item.daysLeft === 0
+          ? '🚨 আজই শেষ দিন!'
+          : item.daysLeft === 1
+          ? '⚠️ আগামীকাল শেষ (১ দিন বাকি)'
+          : `⏳ আর ${toBengaliNumber(item.daysLeft)} দিন বাকি`;
+      return `${toBengaliNumber(idx + 1)}. <b>${escapeTelegramHtml(item.college_name)}</b> — ${remLabel}\n📅 শেষ তারিখ: <code>${escapeTelegramHtml(item.deadline_date)}</code>\n<a href="${escapeTelegramHtml(item.link)}">${escapeTelegramHtml(item.title)}</a>`;
+    });
+
+    await sendTelegramBotReply(botToken, {
+      chat_id: chatId,
+      text: [`⏳ <b>আসন্ন ফরম পূরণ ও ভর্তির শেষ তারিখসমূহ:</b>`, '', ...formattedDeadlines].join('\n\n'),
+      message_thread_id: msg.message_thread_id,
+      reply_to_message_id: replyToMessageId,
+      reply_markup: buildNoticeQuickKeyboard(),
+    });
+    return jsonResponse({ ok: true });
+  }
+
+  // আজকের সব নতুন নোটিশ (/today)
+  if (command === 'today') {
+    const todayDhaka = formatDhakaDateOnly(Date.now());
+    const allNotices = await fetchSortedNoticesForBot(env);
+    const todayItems = allNotices.filter((n) => {
+      const pubDay = n.sortMs > 0 ? formatDhakaDateOnly(n.sortMs) : '';
+      const createdDay = n.createdAt ? formatDhakaDateOnly(Date.parse(n.createdAt)) : '';
+      return pubDay === todayDhaka || createdDay === todayDhaka;
+    });
+
+    const selected = todayItems.slice(0, 10);
+    if (selected.length === 0) {
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: `ℹ️ আজ (${escapeTelegramHtml(todayDhaka)}) এখনো কোনো নতুন নোটিশ যুক্ত হয়নি।`,
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+        reply_markup: buildNoticeQuickKeyboard(),
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    const formattedItems = selected.map((item, idx) => {
+      const datePart = item.date ? ` · 📅 ${escapeTelegramHtml(item.date)}` : '';
+      return `${toBengaliNumber(idx + 1)}. <b>${escapeTelegramHtml(item.college_name)}</b>${datePart}\n<a href="${escapeTelegramHtml(item.link)}">${escapeTelegramHtml(item.title)}</a>`;
+    });
+
+    await sendTelegramBotReply(botToken, {
+      chat_id: chatId,
+      text: [
+        `📰 <b>আজকের নোটিশসমূহ (${escapeTelegramHtml(todayDhaka)} · ${toBengaliNumber(selected.length)}টি):</b>`,
+        '',
+        ...formattedItems,
+        `\n🌐 সব নোটিশ একসাথে: ${escapeTelegramHtml(appOrigin)}`,
+      ].join('\n\n'),
+      message_thread_id: msg.message_thread_id,
+      reply_to_message_id: replyToMessageId,
+      reply_markup: buildNoticeQuickKeyboard(),
+    });
+    return jsonResponse({ ok: true });
+  }
+
+  // ক্যাটাগরি শর্টকাট কমান্ড (/routine, /form, /result, /admission)
+  if (command === 'routine' || command === 'form' || command === 'result' || command === 'admission') {
+    const categoryTitles: Record<'routine' | 'form' | 'result' | 'admission', string> = {
+      routine: '📅 পরীক্ষা ও রুটিন সংক্রান্ত নোটিশ',
+      form: '📝 ফরম পূরণ সংক্রান্ত নোটিশ',
+      result: '📊 ফলাফল সংক্রান্ত নোটিশ',
+      admission: '🎓 ভর্তি সংক্রান্ত নোটিশ',
+    };
+
+    const allNotices = await fetchSortedNoticesForBot(env);
+    let filtered = allNotices.filter((n) => matchesBotCategory(n.title, command));
+    if (rawArg) {
+      const q = rawArg.toLowerCase();
+      filtered = filtered.filter(
+        (n) => n.college_name.toLowerCase().includes(q) || n.title.toLowerCase().includes(q)
+      );
+    }
+
+    const selected = filtered.slice(0, 8);
+    if (selected.length === 0) {
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: `ℹ️ এই মুহূর্তে <b>${categoryTitles[command]}</b> পাওয়া যায়নি।`,
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+        reply_markup: buildNoticeQuickKeyboard(),
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    const formattedItems = selected.map((item, idx) => {
+      const datePart = item.date ? ` · 📅 ${escapeTelegramHtml(item.date)}` : '';
+      return `${toBengaliNumber(idx + 1)}. <b>${escapeTelegramHtml(item.college_name)}</b>${datePart}\n<a href="${escapeTelegramHtml(item.link)}">${escapeTelegramHtml(item.title)}</a>`;
+    });
+
+    await sendTelegramBotReply(botToken, {
+      chat_id: chatId,
+      text: [
+        `<b>${categoryTitles[command]} (${toBengaliNumber(selected.length)}টি):</b>`,
+        '',
+        ...formattedItems,
+        `\n🌐 সব নোটিশ একসাথে: ${escapeTelegramHtml(appOrigin)}`,
+      ].join('\n\n'),
+      message_thread_id: msg.message_thread_id,
+      reply_to_message_id: replyToMessageId,
+      reply_markup: buildNoticeQuickKeyboard(),
     });
     return jsonResponse({ ok: true });
   }
@@ -2025,8 +2564,8 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
       const keyword = rawArg.replace(/\s+/g, ' ').trim().slice(0, 60);
       const displayName =
         msg.chat?.title ||
-        update.message?.from?.first_name ||
-        update.message?.from?.username ||
+        fromUser?.first_name ||
+        fromUser?.username ||
         chatKey;
 
       if (existingIdx >= 0) {
@@ -2085,7 +2624,7 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
 
     const argLower = rawArg.toLowerCase();
     let replyMsg = '';
-    if (!rawArg || argLower === 'all' || rawArg === 'সব') {
+    if (!rawArg || argLower === 'all' || argLower === 'সব') {
       subscriptions.splice(existingIdx, 1);
       replyMsg = '✅ আপনার সবগুলো পার্সোনাল নোটিশ সাবস্ক্রিপশন বন্ধ করা হয়েছে।';
     } else {
@@ -2199,6 +2738,7 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
         text: emptyMsg,
         message_thread_id: msg.message_thread_id,
         reply_to_message_id: replyToMessageId,
+        reply_markup: buildNoticeQuickKeyboard(),
       });
       return jsonResponse({ ok: true });
     }
@@ -2212,13 +2752,14 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
       return `${toBengaliNumber(idx + 1)}. <b>${escapeTelegramHtml(item.college_name)}</b>${datePart}\n<a href="${escapeTelegramHtml(item.link)}">${escapeTelegramHtml(item.title)}</a>`;
     });
 
-    const footer = `\n🌐 সব নোটিশ একসাথে: ${escapeTelegramHtml(new URL(request.url).origin)}`;
+    const footer = `\n🌐 সব নোটিশ একসাথে: ${escapeTelegramHtml(appOrigin)}`;
 
     await sendTelegramBotReply(botToken, {
       chat_id: chatId,
       text: [headerTitle, '', ...formattedItems, footer].join('\n\n'),
       message_thread_id: msg.message_thread_id,
       reply_to_message_id: replyToMessageId,
+      reply_markup: buildNoticeQuickKeyboard(),
     });
     return jsonResponse({ ok: true });
   }
@@ -2328,7 +2869,7 @@ async function handleRegisterTelegramWebhook(request: Request, env: Env): Promis
         body: JSON.stringify({
           url: expectedUrl,
           secret_token: webhookSecret,
-          allowed_updates: ['message', 'channel_post'],
+          allowed_updates: ['message', 'channel_post', 'callback_query'],
         }),
       }),
       fetch(`https://api.telegram.org/bot${settings.botToken}/setMyCommands`, {
@@ -2337,12 +2878,19 @@ async function handleRegisterTelegramWebhook(request: Request, env: Env): Promis
         body: JSON.stringify({
           commands: [
             { command: 'latest', description: 'সর্বশেষ ৮টি নোটিশ দেখুন' },
-            { command: 'notice', description: 'সর্বশেষ নোটিশ দেখুন বা খুঁজুন' },
+            { command: 'today', description: 'আজকের নতুন নোটিশগুলো দেখুন' },
+            { command: 'notice', description: 'কলেজ বা বিষয় দিয়ে নোটিশ খুঁজুন' },
+            { command: 'routine', description: 'পরীক্ষা ও রুটিন সংক্রান্ত নোটিশ' },
+            { command: 'form', description: 'ফরম পূরণ সংক্রান্ত নোটিশ' },
+            { command: 'result', description: 'ফলাফল সংক্রান্ত নোটিশ' },
+            { command: 'admission', description: 'ভর্তি সংক্রান্ত নোটিশ' },
+            { command: 'deadlines', description: 'আসন্ন ফরম পূরণ/ভর্তির শেষ তারিখ' },
             { command: 'subscribe', description: 'কলেজ বা বিষয়ের পার্সোনাল অ্যালার্ট নিন' },
             { command: 'subscriptions', description: 'চালু থাকা সাবস্ক্রিপশন দেখুন' },
             { command: 'unsubscribe', description: 'সাবস্ক্রিপশন বন্ধ করুন' },
             { command: 'colleges', description: 'সক্রিয় কলেজগুলোর তালিকা দেখুন' },
-            { command: 'help', description: 'বট কমান্ড সহায়িকা' },
+            { command: 'request', description: 'নতুন কলেজ যোগ করার অনুরোধ পাঠান' },
+            { command: 'help', description: 'সব কমান্ড সহায়িকা দেখুন' },
           ],
         }),
       }),
