@@ -208,6 +208,8 @@ async function scrapeCollegeNotices(
     if (notices.length === 0) {
       $('.notice-list .notice-item, .notice-item, ul.list-group li, table tr').each((_, el) => {
         const $row = $(el);
+        if ($row.find('th').length > 0 && $row.find('td').length === 0) return;
+
         const $link = $row.find('a[href]').first();
         const rawHref = ($link.attr('href') || '').trim();
         if (!rawHref || rawHref === '#' || rawHref.startsWith('javascript:')) return;
