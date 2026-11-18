@@ -19,7 +19,7 @@ import {
   updateCollege,
   deleteCollege,
 } from './lib/supabase';
-import { Building2, Layers, Send, FileCode } from 'lucide-react';
+import { Building2, Layers, Send, FileCode, AlertTriangle } from 'lucide-react';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<'home' | 'admin'>('home');
@@ -68,7 +68,7 @@ export default function App() {
           supabase_url: getSupabaseUrl(),
           node_env: import.meta.env.MODE || 'production',
         });
-        setDataError('VITE_SUPABASE_URL এবং VITE_SUPABASE_PUBLISHABLE_KEY সেট করা নেই।');
+        setDataError('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
         return;
       }
 
@@ -90,7 +90,8 @@ export default function App() {
       setNotices(fetchedNotices);
     } catch (err: any) {
       console.error('Error loading application data from Supabase:', err);
-      setDataError(err.message || 'Supabase থেকে ডাটা লোড করতে সমস্যা হয়েছে।');
+      const errMsg = err?.message ? ` (${err.message})` : '';
+      setDataError(`Supabase থেকে ডাটা আনতে সমস্যা হয়েছে${errMsg}`);
     } finally {
       setIsLoadingData(false);
     }
@@ -219,6 +220,16 @@ export default function App() {
 
       {/* Main Container - Edge to Edge on Mobile */}
       <main className="w-full max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 py-3 sm:py-6">
+        {dataError && (
+          <div
+            role="alert"
+            className="mb-4 bg-rose-50 border border-rose-300 text-rose-900 rounded-xl p-3.5 sm:p-4 text-xs sm:text-sm font-semibold flex items-start space-x-2.5 shadow-xs"
+          >
+            <AlertTriangle className="w-4 h-4 sm:w-5 sm:h-5 text-rose-600 shrink-0 mt-0.5" />
+            <span>{dataError}</span>
+          </div>
+        )}
+
         {/* Global Stats Overview */}
         <StatsCards colleges={colleges} notices={notices} />
 

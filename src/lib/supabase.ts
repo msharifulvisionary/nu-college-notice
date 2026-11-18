@@ -31,7 +31,7 @@ export async function testSupabaseConnection(): Promise<boolean> {
 
 export async function fetchColleges(onlyActive = false): Promise<College[]> {
   if (!supabase) {
-    throw new Error('Supabase পরিবেশ ভ্যারিয়েবল (VITE_SUPABASE_URL ও VITE_SUPABASE_PUBLISHABLE_KEY) সেট করা নেই।');
+    throw new Error('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
   }
 
   let query = supabase
@@ -53,7 +53,7 @@ export async function fetchColleges(onlyActive = false): Promise<College[]> {
 
 export async function fetchRecentNotices(limit = 100): Promise<Notice[]> {
   if (!supabase) {
-    throw new Error('Supabase পরিবেশ ভ্যারিয়েবল (VITE_SUPABASE_URL ও VITE_SUPABASE_PUBLISHABLE_KEY) সেট করা নেই।');
+    throw new Error('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
   }
 
   const { data, error } = await supabase
@@ -76,7 +76,7 @@ export async function addCollege(
   college: Omit<College, 'id' | 'created_at'>
 ): Promise<College> {
   if (!supabase) {
-    throw new Error('Supabase কনফিগার করা নেই।');
+    throw new Error('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
   }
 
   const { data, error } = await supabase
@@ -97,7 +97,7 @@ export async function updateCollege(
   updates: Partial<College>
 ): Promise<void> {
   if (!supabase) {
-    throw new Error('Supabase কনফিগার করা নেই।');
+    throw new Error('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
   }
 
   const { error } = await supabase
@@ -112,7 +112,7 @@ export async function updateCollege(
 
 export async function deleteCollege(id: string): Promise<void> {
   if (!supabase) {
-    throw new Error('Supabase কনফিগার করা নেই।');
+    throw new Error('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
   }
 
   const { error } = await supabase

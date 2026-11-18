@@ -11,7 +11,8 @@ import {
   Layers,
   RefreshCw,
   Code2,
-  Heart
+  Heart,
+  AlertTriangle
 } from 'lucide-react';
 import { College, Notice } from '../types';
 
@@ -144,6 +145,19 @@ export const HomePage: React.FC<HomePageProps> = ({
         </div>
       </header>
 
+      {/* Top Error Alert Box */}
+      {dataError && (
+        <div className="bg-rose-50 border-b border-rose-300 px-4 py-3">
+          <div
+            role="alert"
+            className="max-w-7xl mx-auto flex items-start sm:items-center space-x-2.5 text-rose-900 text-xs sm:text-sm font-semibold"
+          >
+            <AlertTriangle className="w-4 h-4 sm:w-5 sm:h-5 text-rose-600 shrink-0 mt-0.5 sm:mt-0" />
+            <span>{dataError}</span>
+          </div>
+        </div>
+      )}
+
       {/* Hero Header Section */}
       <section className="bg-white border-b border-slate-200 py-8 sm:py-12 px-4">
         <div className="max-w-4xl mx-auto text-center space-y-4">
@@ -190,11 +204,6 @@ export const HomePage: React.FC<HomePageProps> = ({
 
       {/* Main Content Body */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
-        {dataError && (
-          <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-2xl p-4 text-xs font-medium">
-            {dataError}
-          </div>
-        )}
         
         {/* Notice Search & Filter */}
         <section id="notices">
