@@ -20,6 +20,9 @@ interface CollegeRow {
   notice_url: string;
   selector_config: SelectorConfig;
   is_active: boolean;
+  telegram_chat_id?: string | null;
+  telegram_thread_id?: number | null;
+  consecutive_failures?: number | null;
 }
 
 interface ScrapedNotice {
@@ -63,6 +66,13 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 interface TelegramRuntimeConfig {
   botToken: string;
   chatId: string;
+  lastDailyDigestDate: string;
+}
+
+interface TelegramTarget {
+  botToken: string;
+  chatId: string;
+  threadId?: number;
 }
 
 class HttpStatusError extends Error {
@@ -77,12 +87,13 @@ class HttpStatusError extends Error {
 async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
   let dbToken = '';
   let dbChatId = '';
+  let lastDailyDigestDate = '';
 
   try {
     const { data, error } = await supabase
       .from('settings')
       .select('key, value')
-      .in('key', ['telegram_bot_token', 'telegram_chat_id']);
+      .in('key', ['telegram_bot_token', 'telegram_chat_id', 'last_daily_digest_date']);
 
     if (error) {
       console.warn(`[Settings] Could not read settings table (${error.message}); using env fallback.`);
@@ -94,6 +105,9 @@ async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
         if (row.key === 'telegram_chat_id' && typeof row.value === 'string') {
           dbChatId = row.value.trim();
         }
+        if (row.key === 'last_daily_digest_date' && typeof row.value === 'string') {
+          lastDailyDigestDate = row.value.trim();
+        }
       }
     }
   } catch (err: unknown) {
@@ -104,6 +118,7 @@ async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
   return {
     botToken: dbToken || ENV_TELEGRAM_BOT_TOKEN,
     chatId: dbChatId || ENV_TELEGRAM_CHAT_ID,
+    lastDailyDigestDate,
   };
 }
 
@@ -227,7 +242,12 @@ async function scrapeCollegeNotices(
         if (seenLinks.has(absoluteLink)) return;
         seenLinks.add(absoluteLink);
 
-        const dateText = $row.find('.date, time, td:first-child, td:nth-child(2)').first().text().replace(/\s+/g, ' ').trim();
+        const dateText = $row
+          .find('.date, time, td:first-child, td:nth-child(2)')
+          .first()
+          .text()
+          .replace(/\s+/g, ' ')
+          .trim();
         notices.push({
           title,
           link: absoluteLink,
@@ -278,29 +298,52 @@ function formatTelegramMessage(collegeName: string, notice: ScrapedNotice): stri
   return `🔔 নতুন নোটিশ — ${collegeName}${dateLine}\n\n📌 ${notice.title}\n🔗 ${notice.link}`;
 }
 
-async function sendTelegramMessage(
+function resolveCollegeTelegramTarget(
+  college: CollegeRow,
+  globalConfig: TelegramRuntimeConfig
+): TelegramTarget {
+  const customChat = (college.telegram_chat_id || '').trim();
+  const threadId =
+    typeof college.telegram_thread_id === 'number' && college.telegram_thread_id > 0
+      ? college.telegram_thread_id
+      : undefined;
+
+  return {
+    botToken: globalConfig.botToken,
+    chatId: customChat || globalConfig.chatId,
+    threadId,
+  };
+}
+
+async function sendTelegramTextMessage(
   text: string,
-  telegramConfig: TelegramRuntimeConfig
+  target: TelegramTarget
 ): Promise<{ ok: boolean; error?: string }> {
-  if (!telegramConfig.botToken || !telegramConfig.chatId) {
+  if (!target.botToken || !target.chatId) {
     return {
       ok: false,
-      error: 'Telegram bot token or chat ID is not configured (checked settings table and env)',
+      error: 'Telegram bot token or chat ID is not configured (checked college/settings/env)',
     };
   }
 
-  const cleanChatId = telegramConfig.chatId.replace(/^\./, '');
-  const endpoint = `https://api.telegram.org/bot${telegramConfig.botToken}/sendMessage`;
+  const cleanChatId = target.chatId.replace(/^\./, '');
+  const endpoint = `https://api.telegram.org/bot${target.botToken}/sendMessage`;
+
+  const payload: Record<string, unknown> = {
+    chat_id: cleanChatId,
+    text,
+    disable_web_page_preview: false,
+  };
+
+  if (target.threadId) {
+    payload.message_thread_id = target.threadId;
+  }
 
   try {
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: cleanChatId,
-        text,
-        disable_web_page_preview: false,
-      }),
+      body: JSON.stringify(payload),
     });
 
     const data = (await res.json()) as { ok?: boolean; description?: string };
@@ -315,9 +358,201 @@ async function sendTelegramMessage(
   }
 }
 
+function looksLikePdfUrl(rawUrl: string): boolean {
+  try {
+    const pathname = new URL(rawUrl).pathname.toLowerCase();
+    return pathname.endsWith('.pdf');
+  } catch {
+    return rawUrl.toLowerCase().includes('.pdf');
+  }
+}
+
+function buildSafePdfFilename(title: string, noticeLink: string): string {
+  try {
+    const urlPath = new URL(noticeLink).pathname;
+    const baseName = urlPath.split('/').pop() || '';
+    if (baseName.toLowerCase().endsWith('.pdf') && baseName.length <= 80) {
+      return baseName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    }
+  } catch {
+    // fallback below
+  }
+  const asciiSlug = title
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '_')
+    .slice(0, 40);
+  return `${asciiSlug || 'notice'}.pdf`;
+}
+
+async function tryDownloadPdfBuffer(
+  noticeLink: string
+): Promise<{ buffer: ArrayBuffer; filename: string } | null> {
+  // Only download if URL looks like a PDF or notice attachment endpoint
+  if (!looksLikePdfUrl(noticeLink)) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const maxBytes = 20 * 1024 * 1024; // 20 MB limit
+
+  try {
+    const res = await fetch(noticeLink, {
+      method: 'GET',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) return null;
+
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/pdf') && !looksLikePdfUrl(res.url || noticeLink)) {
+      return null;
+    }
+
+    const contentLengthHeader = res.headers.get('content-length');
+    if (contentLengthHeader && Number(contentLengthHeader) > maxBytes) {
+      console.warn(`[PDF] Skipping oversized PDF (${contentLengthHeader} bytes): ${noticeLink}`);
+      return null;
+    }
+
+    const buffer = await res.arrayBuffer();
+    if (buffer.byteLength === 0 || buffer.byteLength > maxBytes) {
+      return null;
+    }
+
+    return {
+      buffer,
+      filename: buildSafePdfFilename('', res.url || noticeLink),
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[PDF] Could not fetch PDF directly (${msg}), falling back to text message.`);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function sendNoticeWithPdfSupport(
+  collegeName: string,
+  notice: ScrapedNotice,
+  target: TelegramTarget
+): Promise<{ ok: boolean; sentAsPdf: boolean; error?: string }> {
+  const fullText = formatTelegramMessage(collegeName, notice);
+
+  if (!target.botToken || !target.chatId) {
+    return {
+      ok: false,
+      sentAsPdf: false,
+      error: 'Telegram bot token or chat ID is not configured',
+    };
+  }
+
+  const pdfData = await tryDownloadPdfBuffer(notice.link);
+  if (pdfData) {
+    const cleanChatId = target.chatId.replace(/^\./, '');
+    const caption = fullText.length > 1000 ? `${fullText.slice(0, 997)}...` : fullText;
+    const filename = buildSafePdfFilename(notice.title, notice.link);
+
+    const formData = new FormData();
+    formData.append('chat_id', cleanChatId);
+    if (target.threadId) {
+      formData.append('message_thread_id', String(target.threadId));
+    }
+    formData.append('caption', caption);
+    formData.append(
+      'document',
+      new Blob([pdfData.buffer], { type: 'application/pdf' }),
+      filename
+    );
+
+    try {
+      const tgRes = await fetch(`https://api.telegram.org/bot${target.botToken}/sendDocument`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const tgJson = (await tgRes.json()) as { ok?: boolean; description?: string };
+      if (tgRes.ok && tgJson.ok) {
+        return { ok: true, sentAsPdf: true };
+      }
+
+      console.warn(
+        `[Telegram] sendDocument failed (${tgJson.description || tgRes.status}); falling back to sendMessage.`
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Telegram] sendDocument exception (${msg}); falling back to sendMessage.`);
+    }
+  }
+
+  const fallbackResult = await sendTelegramTextMessage(fullText, target);
+  return {
+    ok: fallbackResult.ok,
+    sentAsPdf: false,
+    error: fallbackResult.error,
+  };
+}
+
+async function updateCollegeHealth(
+  college: CollegeRow,
+  outcome: { ok: true } | { ok: false; errorMessage: string },
+  globalConfig: TelegramRuntimeConfig
+): Promise<void> {
+  const nowIso = new Date().toISOString();
+
+  if (outcome.ok) {
+    await supabase
+      .from('colleges')
+      .update({
+        last_checked_at: nowIso,
+        last_status: 'ok',
+        last_error: null,
+        consecutive_failures: 0,
+      })
+      .eq('id', college.id);
+    return;
+  }
+
+  const nextFailures = (college.consecutive_failures ?? 0) + 1;
+  await supabase
+    .from('colleges')
+    .update({
+      last_checked_at: nowIso,
+      last_status: 'error',
+      last_error: outcome.errorMessage.slice(0, 500),
+      consecutive_failures: nextFailures,
+    })
+    .eq('id', college.id);
+
+  // টানা ৩ বার (এবং এরপর প্রতি ৬ বার পর পর) ব্যর্থ হলে এডমিনের টেলিগ্রামে সতর্কবার্তা পাঠানো হবে
+  if (nextFailures === 3 || (nextFailures > 3 && nextFailures % 6 === 0)) {
+    const alertText =
+      `⚠️ হেলথ অ্যালার্ট — ${college.name}\n\n` +
+      `এই কলেজের নোটিশ বোর্ড টানা ${nextFailures} বার স্ক্যান করতে ব্যর্থ হয়েছে।\n` +
+      `কারণ: ${outcome.errorMessage}\n` +
+      `লিংক: ${college.notice_url}`;
+
+    const alertRes = await sendTelegramTextMessage(alertText, {
+      botToken: globalConfig.botToken,
+      chatId: globalConfig.chatId,
+    });
+    if (alertRes.ok) {
+      console.log(`[Health Alert] Sent failure alert for ${college.name} (failures=${nextFailures})`);
+    } else {
+      console.error(`[Health Alert] Failed to send alert for ${college.name}: ${alertRes.error}`);
+    }
+  }
+}
+
 async function processCollege(
   college: CollegeRow,
-  telegramConfig: TelegramRuntimeConfig
+  globalConfig: TelegramRuntimeConfig
 ): Promise<{ newCount: number; sentCount: number }> {
   console.log(`\n[College] Scraping ${college.name} (${college.notice_url})...`);
 
@@ -328,9 +563,14 @@ async function processCollege(
   console.log(`[College] Scraped ${scrapedNotices.length} recent notices (max 20) for ${college.name}`);
 
   if (scrapedNotices.length === 0) {
+    const noMatchMsg = 'নোটিশ বোর্ডে কোনো নোটিশ খুঁজে পাওয়া যায়নি (স্ট্রাকচার পরিবর্তিত হতে পারে)।';
     console.warn(`[College] No notices matched selector for ${college.name}`);
+    await updateCollegeHealth(college, { ok: false, errorMessage: noMatchMsg }, globalConfig);
     return { newCount: 0, sentCount: 0 };
   }
+
+  // স্ক্র্যাপিং সফল হয়েছে -> হেলথ স্ট্যাটাস স্বাভাবিক করা হচ্ছে
+  await updateCollegeHealth(college, { ok: true }, globalConfig);
 
   // Check if this college has any existing rows in notices table (Baseline check)
   const { count: existingCount, error: countError } = await supabase
@@ -389,56 +629,176 @@ async function processCollege(
 
   console.log(`[Diff] ${candidateNotices.length} new notices detected for ${college.name}`);
 
-  if (candidateNotices.length === 0) {
-    return { newCount: 0, sentCount: 0 };
+  let genuinelyNewCount = 0;
+  if (candidateNotices.length > 0) {
+    const newRows: NoticeInsertRow[] = candidateNotices.map((item) => ({
+      college_id: college.id,
+      title: item.title,
+      link: item.link,
+      date: item.date || null,
+      content_hash: generateNoticeHash(item.title, item.link),
+      notified: false,
+      notified_at: null,
+    }));
+
+    const { data: insertedRows, error: upsertError } = await supabase
+      .from('notices')
+      .upsert(newRows, { onConflict: 'link', ignoreDuplicates: true })
+      .select('id');
+
+    if (upsertError) {
+      throw new Error(`Upsert failed for ${college.name}: ${upsertError.message}`);
+    }
+
+    genuinelyNewCount = insertedRows?.length || 0;
+    console.log(`[DB] Inserted ${genuinelyNewCount} genuinely new notices for ${college.name}`);
   }
 
-  const newRows: NoticeInsertRow[] = candidateNotices.map((item) => ({
-    college_id: college.id,
-    title: item.title,
-    link: item.link,
-    date: item.date || null,
-    content_hash: generateNoticeHash(item.title, item.link),
-    notified: false,
-    notified_at: null,
-  }));
-
-  const { data: insertedRows, error: upsertError } = await supabase
+  // RETRY + DISPATCH: notified = false থাকা সব নোটিশ (নতুন + আগের ব্যর্থ) পুরনো-থেকে-নতুন ক্রমে পাঠানো হবে
+  const { data: pendingNotices, error: pendingError } = await supabase
     .from('notices')
-    .upsert(newRows, { onConflict: 'link', ignoreDuplicates: true })
-    .select('id, title, link, date');
+    .select('id, title, link, date')
+    .eq('college_id', college.id)
+    .eq('notified', false)
+    .order('created_at', { ascending: true })
+    .limit(15);
 
-  if (upsertError) {
-    throw new Error(`Upsert failed for ${college.name}: ${upsertError.message}`);
+  if (pendingError) {
+    throw new Error(`Failed to fetch pending notifications for ${college.name}: ${pendingError.message}`);
   }
 
-  const genuinelyNew = insertedRows || [];
-  console.log(`[DB] Inserted ${genuinelyNew.length} genuinely new notices for ${college.name}`);
+  const dispatchQueue = pendingNotices || [];
+  if (dispatchQueue.length === 0) {
+    return { newCount: genuinelyNewCount, sentCount: 0 };
+  }
 
-  // Send oldest-to-newest so the latest notice lands last in Telegram
+  console.log(`[Dispatch] ${dispatchQueue.length} pending notices in Telegram queue for ${college.name}`);
+  const target = resolveCollegeTelegramTarget(college, globalConfig);
+
   let sentCount = 0;
-  for (const row of [...genuinelyNew].reverse()) {
-    const message = formatTelegramMessage(college.name, {
-      title: row.title,
-      link: row.link,
-      date: row.date || undefined,
-    });
+  for (const row of dispatchQueue) {
+    const sendRes = await sendNoticeWithPdfSupport(
+      college.name,
+      {
+        title: row.title,
+        link: row.link,
+        date: row.date || undefined,
+      },
+      target
+    );
 
-    const tgResult = await sendTelegramMessage(message, telegramConfig);
-    if (tgResult.ok) {
+    if (sendRes.ok) {
       await supabase
         .from('notices')
         .update({ notified: true, notified_at: new Date().toISOString() })
         .eq('id', row.id);
       sentCount += 1;
-      console.log(`[Telegram] Sent notice: ${row.title}`);
+      console.log(
+        `[Telegram] Sent (${sendRes.sentAsPdf ? 'PDF' : 'Text'}): ${row.title}`
+      );
     } else {
-      console.error(`[Telegram] Failed to send "${row.title}": ${tgResult.error}`);
+      console.error(`[Telegram] Failed to send "${row.title}" (will retry next run): ${sendRes.error}`);
     }
   }
 
   console.log(`[Telegram] Sent ${sentCount} telegram messages for ${college.name}`);
-  return { newCount: genuinelyNew.length, sentCount };
+  return { newCount: genuinelyNewCount, sentCount };
+}
+
+function getDhakaDateAndHour(date = new Date()): { dhakaDate: string; dhakaHour: number } {
+  const dhakaDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' }).format(date);
+  const hourStr = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Dhaka',
+    hour: '2-digit',
+    hour12: false,
+  }).format(date);
+  return { dhakaDate, dhakaHour: Number(hourStr) || 0 };
+}
+
+async function maybeSendDailyDigest(globalConfig: TelegramRuntimeConfig): Promise<void> {
+  const { dhakaDate, dhakaHour } = getDhakaDateAndHour();
+
+  // রাত ৯টা (21:00 BST) বা তার পরে দিনে একবারই ডাইজেস্ট পাঠানো হবে
+  if (dhakaHour < 21 || globalConfig.lastDailyDigestDate === dhakaDate) {
+    return;
+  }
+
+  if (!globalConfig.botToken || !globalConfig.chatId) {
+    return;
+  }
+
+  console.log(`[Daily Digest] Preparing digest for ${dhakaDate}...`);
+  const startOfDhakaDayUtc = new Date(`${dhakaDate}T00:00:00+06:00`).toISOString();
+
+  const [{ data: colleges }, { data: todayNotices }] = await Promise.all([
+    supabase
+      .from('colleges')
+      .select('id, name, is_active, last_status, consecutive_failures'),
+    supabase
+      .from('notices')
+      .select('id, college_id, title, colleges(name)')
+      .gte('created_at', startOfDhakaDayUtc),
+  ]);
+
+  const activeColleges = (colleges || []).filter((c) => c.is_active);
+  const errorColleges = activeColleges.filter((c) => c.last_status === 'error');
+  const noticesList = (todayNotices || []) as Array<{
+    id: string;
+    college_id: string;
+    title: string;
+    colleges?: { name?: string } | Array<{ name?: string }> | null;
+  }>;
+
+  const countsByCollege = new Map<string, { name: string; count: number }>();
+  for (const item of noticesList) {
+    const colRel = Array.isArray(item.colleges) ? item.colleges[0] : item.colleges;
+    const name = colRel?.name || 'অজানা কলেজ';
+    const curr = countsByCollege.get(item.college_id) || { name, count: 0 };
+    curr.count += 1;
+    countsByCollege.set(item.college_id, curr);
+  }
+
+  const lines: string[] = [
+    `📊 দৈনিক নোটিশ ডাইজেস্ট (${dhakaDate})`,
+    '',
+    `🏫 সক্রিয় কলেজ: ${activeColleges.length} টি`,
+    `📰 আজকের মোট নতুন নোটিশ: ${noticesList.length} টি`,
+  ];
+
+  if (countsByCollege.size > 0) {
+    lines.push('', '📌 কলেজভিত্তিক সারসংক্ষেপ:');
+    for (const entry of countsByCollege.values()) {
+      lines.push(`• ${entry.name}: ${entry.count} টি`);
+    }
+  } else {
+    lines.push('', 'ℹ️ আজ এখনো কোনো নতুন নোটিশ পাওয়া যায়নি।');
+  }
+
+  if (errorColleges.length > 0) {
+    lines.push('', `⚠️ স্ক্যান সমস্যাযুক্ত কলেজ (${errorColleges.length} টি):`);
+    for (const errCol of errorColleges) {
+      lines.push(`• ${errCol.name} (টানা ${errCol.consecutive_failures || 1} বার ব্যর্থ)`);
+    }
+  }
+
+  const sendRes = await sendTelegramTextMessage(lines.join('\n'), {
+    botToken: globalConfig.botToken,
+    chatId: globalConfig.chatId,
+  });
+
+  if (sendRes.ok) {
+    await supabase.from('settings').upsert(
+      {
+        key: 'last_daily_digest_date',
+        value: dhakaDate,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+    console.log(`[Daily Digest] Sent successfully for ${dhakaDate}`);
+  } else {
+    console.error(`[Daily Digest] Failed to send: ${sendRes.error}`);
+  }
 }
 
 async function runTestMode(): Promise<void> {
@@ -483,6 +843,7 @@ async function runTestMode(): Promise<void> {
         status: 'success',
         updated_at: new Date().toISOString(),
         result: {
+          mode: 'test',
           college_name: targetCollege.name,
           notice_url: targetCollege.notice_url,
           parsed_count: totalMatched,
@@ -511,6 +872,7 @@ async function runTestMode(): Promise<void> {
         status: 'error',
         updated_at: new Date().toISOString(),
         result: {
+          mode: 'test',
           error: {
             name: errName,
             message: errMsg,
@@ -532,18 +894,39 @@ async function main() {
     return;
   }
 
-  const telegramConfig = await loadTelegramConfig();
+  // এডমিন ড্যাশবোর্ডের "সব কলেজ এখনই স্ক্যান করুন" রান হলে স্ট্যাটাস আপডেট শুরু করা হচ্ছে
+  if (TEST_RUN_ID) {
+    await supabase
+      .from('test_runs')
+      .update({ status: 'running', updated_at: new Date().toISOString() })
+      .eq('id', TEST_RUN_ID);
+  }
+
+  const globalConfig = await loadTelegramConfig();
   console.log(
-    `[Settings] Telegram config loaded (botToken=${telegramConfig.botToken ? 'configured' : 'missing'}, chatId=${telegramConfig.chatId ? 'configured' : 'missing'})`
+    `[Settings] Telegram config loaded (botToken=${globalConfig.botToken ? 'configured' : 'missing'}, chatId=${globalConfig.chatId ? 'configured' : 'missing'})`
   );
 
   const { data: colleges, error: collegesError } = await supabase
     .from('colleges')
-    .select('id, name, notice_url, selector_config, is_active')
+    .select('id, name, notice_url, selector_config, is_active, telegram_chat_id, telegram_thread_id, consecutive_failures')
     .eq('is_active', true);
 
   if (collegesError) {
     console.error('[Scraper] Failed to load active colleges:', collegesError.message);
+    if (TEST_RUN_ID) {
+      await supabase
+        .from('test_runs')
+        .update({
+          status: 'error',
+          updated_at: new Date().toISOString(),
+          result: {
+            mode: 'normal',
+            error: { name: 'DatabaseError', message: collegesError.message },
+          },
+        })
+        .eq('id', TEST_RUN_ID);
+    }
     process.exit(1);
   }
 
@@ -556,14 +939,34 @@ async function main() {
 
   for (const college of activeColleges) {
     try {
-      const { newCount, sentCount } = await processCollege(college, telegramConfig);
+      const { newCount, sentCount } = await processCollege(college, globalConfig);
       totalNew += newCount;
       totalSent += sentCount;
     } catch (err: unknown) {
       failedColleges += 1;
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[Error] ${college.name}: ${message}`);
+      await updateCollegeHealth(college, { ok: false, errorMessage: message }, globalConfig);
     }
+  }
+
+  await maybeSendDailyDigest(globalConfig);
+
+  if (TEST_RUN_ID) {
+    await supabase
+      .from('test_runs')
+      .update({
+        status: 'success',
+        updated_at: new Date().toISOString(),
+        result: {
+          mode: 'normal',
+          total_colleges: activeColleges.length,
+          new_notices: totalNew,
+          sent_count: totalSent,
+          failed_colleges: failedColleges,
+        },
+      })
+      .eq('id', TEST_RUN_ID);
   }
 
   console.log(
@@ -571,7 +974,23 @@ async function main() {
   );
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('[Scraper Fatal Error]:', err);
+  if (TEST_RUN_ID) {
+    await supabase
+      .from('test_runs')
+      .update({
+        status: 'error',
+        updated_at: new Date().toISOString(),
+        result: {
+          mode: SCRAPE_MODE === 'test' ? 'test' : 'normal',
+          error: {
+            name: err instanceof Error ? err.name : 'FatalError',
+            message: err instanceof Error ? err.message : String(err),
+          },
+        },
+      })
+      .eq('id', TEST_RUN_ID);
+  }
   process.exit(1);
 });

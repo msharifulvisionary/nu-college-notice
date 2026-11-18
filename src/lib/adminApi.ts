@@ -159,6 +159,26 @@ export async function sendAdminTelegramTest(
   );
 }
 
+export async function sendAdminDailyDigest(
+  onUnauthorized?: UnauthorizedHandler
+): Promise<{ ok: boolean; message?: string; error?: string }> {
+  return adminRequest<{ ok: boolean; message?: string; error?: string }>(
+    '/api/admin/daily-digest',
+    { method: 'POST' },
+    onUnauthorized
+  );
+}
+
+export async function triggerAdminScanAll(
+  onUnauthorized?: UnauthorizedHandler
+): Promise<{ test_run_id: string; status: string; message: string }> {
+  return adminRequest<{ test_run_id: string; status: string; message: string }>(
+    '/api/admin/scan-all',
+    { method: 'POST' },
+    onUnauthorized
+  );
+}
+
 export async function triggerAdminTestRun(
   collegeId: string,
   onUnauthorized?: UnauthorizedHandler

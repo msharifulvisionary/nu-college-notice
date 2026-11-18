@@ -11,10 +11,19 @@ import {
   CheckCircle2,
   AlertCircle,
   Calendar,
+  Zap,
+  Activity,
+  MessageSquare,
 } from 'lucide-react';
 import { College, TestRunRecord } from '../types';
 
 export interface CollegeTestUiState {
+  isRunning: boolean;
+  run?: TestRunRecord | null;
+  error?: string | null;
+}
+
+export interface ScanAllUiState {
   isRunning: boolean;
   run?: TestRunRecord | null;
   error?: string | null;
@@ -26,11 +35,26 @@ interface CollegeListProps {
   togglingId: string | null;
   deletingId: string | null;
   testStates: Record<string, CollegeTestUiState>;
+  scanAllState: ScanAllUiState;
+  onScanAllColleges: () => void;
   onToggleActive: (college: College) => void;
   onEditCollege: (college: College) => void;
   onDeleteCollege: (college: College) => void;
   onOpenAddModal: () => void;
   onTestScrapeCollege: (college: College) => void;
+}
+
+function formatCheckedTime(iso: string | null | undefined): string {
+  if (!iso) return 'এখনো চেক হয়নি';
+  try {
+    return new Intl.DateTimeFormat('bn-BD', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+      timeZone: 'Asia/Dhaka',
+    }).format(new Date(iso));
+  } catch {
+    return new Date(iso).toLocaleString();
+  }
 }
 
 export const CollegeList: React.FC<CollegeListProps> = ({
@@ -39,6 +63,8 @@ export const CollegeList: React.FC<CollegeListProps> = ({
   togglingId,
   deletingId,
   testStates,
+  scanAllState,
+  onScanAllColleges,
   onToggleActive,
   onEditCollege,
   onDeleteCollege,
@@ -50,23 +76,92 @@ export const CollegeList: React.FC<CollegeListProps> = ({
   return (
     <div className="bg-white border border-slate-200 rounded-xl sm:rounded-2xl p-3.5 sm:p-6 shadow-xs mb-8">
       {/* Header section */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 border-b border-slate-100">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3.5 border-b border-slate-100">
         <div>
           <h2 className="text-sm sm:text-base font-bold text-slate-900">কলেজ নোটিশ বোর্ডসমূহ</h2>
           <p className="text-[11px] sm:text-xs text-slate-500 mt-0.5">
-            সক্রিয় রাখা কলেজগুলোর নোটিশ বোর্ড প্রতি ২০ মিনিটে স্বয়ংক্রিয়ভাবে চেক করা হবে
+            সক্রিয় কলেজগুলোর ওয়েবসাইট প্রতি ২০ মিনিটে স্বয়ংক্রিয়ভাবে এবং নিচের বাটন থেকে তাৎক্ষণিক স্ক্যান করা যায়
           </p>
         </div>
 
-        <button
-          id="btn-add-new-college"
-          onClick={onOpenAddModal}
-          className="inline-flex items-center justify-center space-x-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer w-full sm:w-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>নতুন কলেজ যোগ করুন</span>
-        </button>
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+          <button
+            type="button"
+            onClick={onScanAllColleges}
+            disabled={scanAllState.isRunning || colleges.filter((c) => c.is_active).length === 0}
+            className="inline-flex items-center justify-center space-x-1.5 px-3.5 py-2 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer disabled:opacity-50"
+          >
+            {scanAllState.isRunning ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Zap className="w-4 h-4" />
+            )}
+            <span>{scanAllState.isRunning ? 'সব কলেজ স্ক্যান হচ্ছে...' : 'সব কলেজ এখনই স্ক্যান করুন'}</span>
+          </button>
+
+          <button
+            id="btn-add-new-college"
+            onClick={onOpenAddModal}
+            className="inline-flex items-center justify-center space-x-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>নতুন কলেজ যোগ করুন</span>
+          </button>
+        </div>
       </div>
+
+      {/* Scan All Output Banner */}
+      {(scanAllState.isRunning || scanAllState.run || scanAllState.error) && (
+        <div className="mt-4 p-3.5 rounded-xl border bg-slate-50 border-slate-200 text-xs">
+          {scanAllState.isRunning && (
+            <div className="flex items-center space-x-2 text-sky-700 font-semibold">
+              <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+              <span>
+                সব সক্রিয় কলেজের নোটিশ স্ক্যান চলছে... সম্পন্ন হলে নতুন নোটিশ টেলিগ্রামে পাঠানো হবে (সর্বোচ্চ ২-৩ মিনিট লাগতে পারে)।
+              </span>
+            </div>
+          )}
+
+          {!scanAllState.isRunning && scanAllState.error && (
+            <div className="flex items-start space-x-2 text-rose-700 font-semibold">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+              <span>{scanAllState.error}</span>
+            </div>
+          )}
+
+          {!scanAllState.isRunning && scanAllState.run?.status === 'error' && (
+            <div className="flex items-start space-x-2 text-rose-700 font-semibold">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+              <span>
+                স্ক্যান করতে সমস্যা হয়েছে: {scanAllState.run.result?.error?.message || 'অজানা ত্রুটি'}
+              </span>
+            </div>
+          )}
+
+          {!scanAllState.isRunning && scanAllState.run?.status === 'success' && (
+            <div className="flex flex-wrap items-center gap-3 text-emerald-800 font-semibold">
+              <span className="inline-flex items-center space-x-1.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>সব কলেজ স্ক্যান সম্পন্ন হয়েছে!</span>
+              </span>
+              <span className="bg-white border border-emerald-200 px-2.5 py-0.5 rounded-md text-[11px]">
+                মোট কলেজ: {scanAllState.run.result?.total_colleges ?? 0} টি
+              </span>
+              <span className="bg-white border border-emerald-200 px-2.5 py-0.5 rounded-md text-[11px]">
+                নতুন নোটিশ: {scanAllState.run.result?.new_notices ?? 0} টি
+              </span>
+              <span className="bg-white border border-sky-200 text-sky-800 px-2.5 py-0.5 rounded-md text-[11px]">
+                টেলিগ্রাম পাঠানো হয়েছে: {scanAllState.run.result?.sent_count ?? 0} টি
+              </span>
+              {(scanAllState.run.result?.failed_colleges ?? 0) > 0 && (
+                <span className="bg-rose-50 border border-rose-200 text-rose-800 px-2.5 py-0.5 rounded-md text-[11px]">
+                  ব্যর্থ কলেজ: {scanAllState.run.result?.failed_colleges} টি
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* College List Grid */}
       {isLoadingColleges && colleges.length === 0 ? (
@@ -90,6 +185,9 @@ export const CollegeList: React.FC<CollegeListProps> = ({
             const isDeleting = deletingId === college.id;
             const isToggling = togglingId === college.id;
             const isConfirmingDelete = confirmDeleteId === college.id;
+
+            const healthStatus = college.last_status || 'unknown';
+            const failureCount = college.consecutive_failures || 0;
 
             return (
               <div
@@ -152,6 +250,46 @@ export const CollegeList: React.FC<CollegeListProps> = ({
                       )}
                     </button>
                   </div>
+
+                  {/* Health Status & Custom Telegram Routing Info */}
+                  <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+                    {healthStatus === 'ok' ? (
+                      <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
+                        <Activity className="w-3 h-3" />
+                        <span>স্বাভাবিক</span>
+                      </span>
+                    ) : healthStatus === 'error' ? (
+                      <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-rose-50 text-rose-700 border border-rose-200 font-semibold">
+                        <AlertCircle className="w-3 h-3" />
+                        <span>সমস্যা ({failureCount} বার ব্যর্থ)</span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 font-medium">
+                        <Activity className="w-3 h-3" />
+                        <span>এখনো স্ক্যান হয়নি</span>
+                      </span>
+                    )}
+
+                    <span className="text-[10px] text-slate-500">
+                      সর্বশেষ চেক: {formatCheckedTime(college.last_checked_at)}
+                    </span>
+
+                    {(college.telegram_chat_id || college.telegram_thread_id) && (
+                      <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-sky-50 text-sky-700 border border-sky-200 font-medium">
+                        <MessageSquare className="w-3 h-3" />
+                        <span>
+                          কাস্টম চ্যাট
+                          {college.telegram_thread_id ? ` (টপিক #${college.telegram_thread_id})` : ''}
+                        </span>
+                      </span>
+                    )}
+                  </div>
+
+                  {healthStatus === 'error' && college.last_error && (
+                    <p className="mt-1.5 text-[11px] text-rose-700 bg-rose-50/80 border border-rose-200 rounded-lg px-2.5 py-1.5 line-clamp-2">
+                      এরর: {college.last_error}
+                    </p>
+                  )}
                 </div>
 
                 {/* Action Toolbar */}
@@ -290,7 +428,7 @@ export const CollegeList: React.FC<CollegeListProps> = ({
                           </div>
                         ) : (
                           <p className="text-[11px] text-amber-700 bg-amber-50 p-2 rounded-lg border border-amber-200">
-                            কোনো নোটিশ সিলেক্টরের সাথে ম্যাচ করেনি। selector_config যাচাই করুন।
+                            কোনো নোটিশ পাওয়া যায়নি। ওয়েবসাইটের কাঠামো যাচাই করুন।
                           </p>
                         )}
                       </div>

@@ -3,7 +3,7 @@ import { HomePage } from './components/HomePage';
 import { AdminLoginModal } from './components/AdminLoginModal';
 import { Header } from './components/Header';
 import { StatsCards } from './components/StatsCards';
-import { CollegeList, CollegeTestUiState } from './components/CollegeList';
+import { CollegeList, CollegeTestUiState, ScanAllUiState } from './components/CollegeList';
 import { AddCollegeModal } from './components/AddCollegeModal';
 import { NoticeHistory } from './components/NoticeHistory';
 import { TelegramTester } from './components/TelegramTester';
@@ -26,6 +26,8 @@ import {
   fetchAdminSettings,
   saveAdminSettings,
   sendAdminTelegramTest,
+  sendAdminDailyDigest,
+  triggerAdminScanAll,
   triggerAdminTestRun,
   fetchAdminTestRunStatus,
 } from './lib/adminApi';
@@ -66,8 +68,14 @@ export default function App() {
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, CollegeTestUiState>>({});
+  const [scanAllState, setScanAllState] = useState<ScanAllUiState>({
+    isRunning: false,
+    run: null,
+    error: null,
+  });
 
   const activePollTimersRef = useRef<Record<string, number>>({});
+  const scanAllTimerRef = useRef<number | null>(null);
 
   const navigateView = useCallback((view: 'home' | 'admin') => {
     setCurrentView(view);
@@ -88,12 +96,15 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Cleanup active test polling timers on unmount
+  // Cleanup active test & scan-all polling timers on unmount
   useEffect(() => {
     return () => {
       Object.keys(activePollTimersRef.current).forEach((collegeId) => {
         window.clearTimeout(activePollTimersRef.current[collegeId]);
       });
+      if (scanAllTimerRef.current !== null) {
+        window.clearTimeout(scanAllTimerRef.current);
+      }
     };
   }, []);
 
@@ -355,7 +366,61 @@ export default function App() {
     }
   };
 
-  // Telegram Settings & Test handlers (via Worker API)
+  // Scan All Active Colleges Now + 3s Polling (max 3 minutes)
+  const handleScanAllColleges = async () => {
+    if (scanAllTimerRef.current !== null) {
+      window.clearTimeout(scanAllTimerRef.current);
+      scanAllTimerRef.current = null;
+    }
+
+    setScanAllState({ isRunning: true, run: null, error: null });
+
+    try {
+      const triggerRes = await triggerAdminScanAll(handleUnauthorized);
+      const runId = triggerRes.test_run_id;
+      const startedAt = Date.now();
+      const maxDurationMs = 180000;
+
+      const pollScanAll = async () => {
+        try {
+          const run = await fetchAdminTestRunStatus(runId, handleUnauthorized);
+
+          if (run.status === 'success' || run.status === 'error') {
+            setScanAllState({ isRunning: false, run, error: null });
+            scanAllTimerRef.current = null;
+            // হেলথ স্ট্যাটাস ও নতুন নোটিশ রিফ্রেশ করা হচ্ছে
+            await handleRefreshAll();
+            return;
+          }
+
+          if (Date.now() - startedAt >= maxDurationMs) {
+            setScanAllState({
+              isRunning: false,
+              run,
+              error:
+                '৩ মিনিট পার হয়ে গেছে কিন্তু স্ক্যান এখনো চলছে। কিছুক্ষণ পর রিফ্রেশ করে দেখুন।',
+            });
+            scanAllTimerRef.current = null;
+            return;
+          }
+
+          scanAllTimerRef.current = window.setTimeout(pollScanAll, 3000);
+        } catch (pollErr: unknown) {
+          const msg =
+            pollErr instanceof Error ? pollErr.message : 'স্ক্যানের ফলাফল জানতে সমস্যা হয়েছে।';
+          setScanAllState({ isRunning: false, run: null, error: msg });
+          scanAllTimerRef.current = null;
+        }
+      };
+
+      scanAllTimerRef.current = window.setTimeout(pollScanAll, 3000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'সব কলেজ স্ক্যান শুরু করতে সমস্যা হয়েছে।';
+      setScanAllState({ isRunning: false, run: null, error: msg });
+    }
+  };
+
+  // Telegram Settings, Test & Daily Digest handlers (via Worker API)
   const handleLoadTelegramSettings = useCallback(
     () => fetchAdminSettings(handleUnauthorized),
     [handleUnauthorized]
@@ -369,6 +434,11 @@ export default function App() {
 
   const handleSendTelegramTest = useCallback(
     (message?: string) => sendAdminTelegramTest(message, handleUnauthorized),
+    [handleUnauthorized]
+  );
+
+  const handleSendDailyDigest = useCallback(
+    () => sendAdminDailyDigest(handleUnauthorized),
     [handleUnauthorized]
   );
 
@@ -516,6 +586,8 @@ export default function App() {
             togglingId={togglingId}
             deletingId={deletingId}
             testStates={testStates}
+            scanAllState={scanAllState}
+            onScanAllColleges={handleScanAllColleges}
             onToggleActive={handleToggleActive}
             onEditCollege={(college) => {
               setEditingCollege(college);
@@ -537,6 +609,7 @@ export default function App() {
             onLoadSettings={handleLoadTelegramSettings}
             onSaveSettings={handleSaveTelegramSettings}
             onTestTelegram={handleSendTelegramTest}
+            onSendDailyDigest={handleSendDailyDigest}
           />
         )}
       </main>

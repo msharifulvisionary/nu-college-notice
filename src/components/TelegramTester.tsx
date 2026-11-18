@@ -9,6 +9,7 @@ import {
   Eye,
   EyeOff,
   Loader2,
+  BarChart3,
 } from 'lucide-react';
 import { TelegramSettingsResponse } from '../types';
 
@@ -19,12 +20,14 @@ interface TelegramTesterProps {
     telegram_chat_id: string;
   }) => Promise<TelegramSettingsResponse>;
   onTestTelegram: (message?: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
+  onSendDailyDigest: () => Promise<{ ok: boolean; message?: string; error?: string }>;
 }
 
 export const TelegramTester: React.FC<TelegramTesterProps> = ({
   onLoadSettings,
   onSaveSettings,
   onTestTelegram,
+  onSendDailyDigest,
 }) => {
   const [botToken, setBotToken] = useState('');
   const [maskedToken, setMaskedToken] = useState('');
@@ -39,6 +42,7 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
   const [isLoadingSettings, setIsLoadingSettings] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [isSendingDigest, setIsSendingDigest] = useState(false);
   const [resultMsg, setResultMsg] = useState<{ success: boolean; text: string } | null>(null);
 
   useEffect(() => {
@@ -125,6 +129,33 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
     }
   };
 
+  const handleDigestClick = async () => {
+    setIsSendingDigest(true);
+    setResultMsg(null);
+
+    try {
+      const res = await onSendDailyDigest();
+      if (res.ok) {
+        setResultMsg({
+          success: true,
+          text: res.message || 'আজকের ডেইলি ডাইজেস্ট সফলভাবে পাঠানো হয়েছে!',
+        });
+      } else {
+        setResultMsg({
+          success: false,
+          text: res.error || 'ডাইজেস্ট পাঠাতে ব্যর্থ হয়েছে।',
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'নেটওয়ার্ক ত্রুটি হয়েছে।';
+      setResultMsg({ success: false, text: msg });
+    } finally {
+      setIsSendingDigest(false);
+    }
+  };
+
+  const anyBusy = isSaving || isTesting || isSendingDigest;
+
   return (
     <div className="bg-white border border-slate-200 rounded-xl sm:rounded-2xl p-3.5 sm:p-6 shadow-xs mb-8">
       {/* Header */}
@@ -134,10 +165,10 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
         </div>
         <div>
           <h2 className="text-sm sm:text-base font-bold text-slate-900">
-            টেলিগ্রাম বট কনফিগারেশন ও টেস্ট
+            টেলিগ্রাম বট কনফিগারেশন, টেস্ট ও ডেইলি ডাইজেস্ট
           </h2>
           <p className="text-[11px] sm:text-xs text-slate-500">
-            এখান থেকে ডাটাবেজের Telegram Bot Token ও Chat ID সেভ এবং টেস্ট মেসেজ পাঠাতে পারবেন
+            মূল টেলিগ্রাম চ্যানেল সেটিংস সেভ, টেস্ট মেসেজ এবং তাৎক্ষণিক ডেইলি ডাইজেস্ট পাঠাতে পারবেন (রাত ৯টায় অটো ডাইজেস্টও চালু আছে)
           </p>
         </div>
       </div>
@@ -189,7 +220,7 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
             {/* Chat ID Input */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Telegram Chat ID *
+                ডিফল্ট Telegram Chat ID *
               </label>
               <input
                 type="text"
@@ -237,13 +268,13 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-slate-100">
             <div className="text-xs text-slate-500 flex items-center space-x-1">
               <HelpCircle className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <span>বট টোকেন সেভ করার পর টেস্ট মেসেজ পাঠিয়ে যাচাই করুন।</span>
+              <span>PDF নোটিশ থাকলে বট সরাসরি PDF ফাইলসহ মেসেজ পাঠাবে।</span>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="submit"
-                disabled={isSaving || isTesting}
+                disabled={anyBusy}
                 className="inline-flex items-center justify-center space-x-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-all disabled:opacity-50 cursor-pointer"
               >
                 {isSaving ? (
@@ -257,7 +288,7 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
               <button
                 type="button"
                 onClick={handleSendTest}
-                disabled={isTesting || isSaving || !hasSavedToken || !chatId.trim()}
+                disabled={anyBusy || !hasSavedToken || !chatId.trim()}
                 className="inline-flex items-center justify-center space-x-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-all disabled:opacity-50 cursor-pointer"
               >
                 {isTesting ? (
@@ -266,6 +297,20 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
                   <Send className="w-3.5 h-3.5" />
                 )}
                 <span>{isTesting ? 'পাঠানো হচ্ছে...' : 'টেস্ট মেসেজ পাঠান'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleDigestClick}
+                disabled={anyBusy || !hasSavedToken || !chatId.trim()}
+                className="inline-flex items-center justify-center space-x-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-all disabled:opacity-50 cursor-pointer"
+              >
+                {isSendingDigest ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <BarChart3 className="w-3.5 h-3.5" />
+                )}
+                <span>{isSendingDigest ? 'পাঠানো হচ্ছে...' : 'আজকের ডাইজেস্ট পাঠান'}</span>
               </button>
             </div>
           </div>

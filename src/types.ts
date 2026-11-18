@@ -17,14 +17,22 @@ export interface College {
   notice_url: string;
   selector_config: SelectorConfig;
   is_active: boolean;
+  telegram_chat_id?: string | null;
+  telegram_thread_id?: number | null;
+  last_checked_at?: string | null;
+  last_status?: 'unknown' | 'ok' | 'error' | string | null;
+  last_error?: string | null;
+  consecutive_failures?: number | null;
   created_at?: string;
 }
 
 export interface CollegePayload {
   name: string;
   notice_url: string;
-  selector_config: SelectorConfig;
+  selector_config?: SelectorConfig;
   is_active: boolean;
+  telegram_chat_id?: string | null;
+  telegram_thread_id?: number | null;
 }
 
 export interface Notice {
@@ -54,10 +62,15 @@ export interface TestRunSampleNotice {
 }
 
 export interface TestRunResult {
+  mode?: 'test' | 'normal';
   college_name?: string;
   notice_url?: string;
   parsed_count?: number;
   sample?: TestRunSampleNotice[];
+  total_colleges?: number;
+  new_notices?: number;
+  sent_count?: number;
+  failed_colleges?: number;
   error?: {
     name?: string;
     message?: string;
@@ -67,7 +80,7 @@ export interface TestRunResult {
 
 export interface TestRunRecord {
   id: string;
-  college_id: string;
+  college_id: string | null;
   status: 'pending' | 'running' | 'success' | 'error';
   result: TestRunResult | null;
   created_at?: string;

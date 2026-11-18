@@ -38,6 +38,12 @@ interface CollegeRecord {
   notice_url: string;
   selector_config: SelectorConfig;
   is_active: boolean;
+  telegram_chat_id?: string | null;
+  telegram_thread_id?: number | null;
+  last_checked_at?: string | null;
+  last_status?: string | null;
+  last_error?: string | null;
+  consecutive_failures?: number | null;
   created_at?: string;
 }
 
@@ -49,11 +55,19 @@ interface SettingRow {
 
 interface TestRunRow {
   id: string;
-  college_id: string;
+  college_id: string | null;
   status: string;
   result: unknown;
   created_at?: string;
   updated_at?: string;
+}
+
+interface DigestNoticeRow {
+  id: string;
+  college_id: string;
+  title: string;
+  created_at: string;
+  colleges?: { name?: string } | null;
 }
 
 // সাধারণ JSON রেসপন্স তৈরি করার হেল্পার
@@ -112,6 +126,25 @@ function normalizeGithubRepo(rawRepo: string | undefined): string {
     .replace(/^https?:\/\/github\.com\//i, '')
     .replace(/\.git$/i, '')
     .replace(/^\/+|\/+$/g, '');
+}
+
+// কাস্টম টেলিগ্রাম Thread ID যাচাই করার হেল্পার
+function parseOptionalThreadId(raw: unknown): { valid: boolean; value: number | null } {
+  if (raw === undefined || raw === null || raw === '') {
+    return { valid: true, value: null };
+  }
+  const num = typeof raw === 'number' ? raw : Number(String(raw).trim());
+  if (!Number.isInteger(num) || num <= 0) {
+    return { valid: false, value: null };
+  }
+  return { valid: true, value: num };
+}
+
+// কাস্টম টেলিগ্রাম Chat ID পরিষ্কার করার হেল্পার
+function cleanOptionalChatId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim().replace(/^\./, '');
+  return trimmed || null;
 }
 
 // Supabase PostgREST API কল করার হেল্পার (Service Role Key সহ)
@@ -334,12 +367,16 @@ async function handleCreateCollege(request: Request, env: Env): Promise<Response
     notice_url?: unknown;
     selector_config?: unknown;
     is_active?: unknown;
+    telegram_chat_id?: unknown;
+    telegram_thread_id?: unknown;
   }>(request);
   if (parsed.errorResponse || !parsed.data) return parsed.errorResponse as Response;
 
   const name = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : '';
   const noticeUrl = typeof parsed.data.notice_url === 'string' ? parsed.data.notice_url.trim() : '';
   const isActive = typeof parsed.data.is_active === 'boolean' ? parsed.data.is_active : true;
+  const telegramChatId = cleanOptionalChatId(parsed.data.telegram_chat_id);
+  const parsedThread = parseOptionalThreadId(parsed.data.telegram_thread_id);
 
   if (!name) {
     return jsonResponse({ error: 'কলেজের নাম অবশ্যই দিতে হবে।' }, 400);
@@ -352,6 +389,13 @@ async function handleCreateCollege(request: Request, env: Env): Promise<Response
     }
   } catch {
     return jsonResponse({ error: 'সঠিক নোটিশ বোর্ড URL ফরম্যাট দিন।' }, 400);
+  }
+
+  if (!parsedThread.valid) {
+    return jsonResponse(
+      { error: 'টেলিগ্রাম Topic / Thread ID অবশ্যই একটি ধনাত্মক পূর্ণসংখ্যা হতে হবে।' },
+      400
+    );
   }
 
   const rawSelectorConfig = parsed.data.selector_config;
@@ -376,6 +420,8 @@ async function handleCreateCollege(request: Request, env: Env): Promise<Response
         notice_url: noticeUrl,
         selector_config: selectorConfig,
         is_active: isActive,
+        telegram_chat_id: telegramChatId,
+        telegram_thread_id: parsedThread.value,
       },
     ],
   });
@@ -406,6 +452,8 @@ async function handleUpdateCollege(request: Request, env: Env, id: string): Prom
     notice_url?: unknown;
     selector_config?: unknown;
     is_active?: unknown;
+    telegram_chat_id?: unknown;
+    telegram_thread_id?: unknown;
   }>(request);
   if (parsed.errorResponse || !parsed.data) return parsed.errorResponse as Response;
 
@@ -450,6 +498,21 @@ async function handleUpdateCollege(request: Request, env: Env, id: string): Prom
       return jsonResponse({ error: 'is_active মান অবশ্যই true বা false হতে হবে।' }, 400);
     }
     updates.is_active = parsed.data.is_active;
+  }
+
+  if (parsed.data.telegram_chat_id !== undefined) {
+    updates.telegram_chat_id = cleanOptionalChatId(parsed.data.telegram_chat_id);
+  }
+
+  if (parsed.data.telegram_thread_id !== undefined) {
+    const parsedThread = parseOptionalThreadId(parsed.data.telegram_thread_id);
+    if (!parsedThread.valid) {
+      return jsonResponse(
+        { error: 'টেলিগ্রাম Topic / Thread ID অবশ্যই একটি ধনাত্মক পূর্ণসংখ্যা হতে হবে।' },
+        400
+      );
+    }
+    updates.telegram_thread_id = parsedThread.value;
   }
 
   if (Object.keys(updates).length === 0) {
@@ -509,7 +572,7 @@ async function handleDeleteCollege(env: Env, id: string): Promise<Response> {
 }
 
 // ============================================================================
-// টেলিগ্রাম সেটিংস ও টেস্ট মেসেজ হ্যান্ডলারসমূহ
+// টেলিগ্রাম সেটিংস, টেস্ট মেসেজ ও ডেইলি ডাইজেস্ট হ্যান্ডলারসমূহ
 // ============================================================================
 async function handleGetSettings(env: Env): Promise<Response> {
   const settings = await fetchTelegramSettings(env);
@@ -587,7 +650,6 @@ async function handleUpdateSettings(request: Request, env: Env): Promise<Respons
 }
 
 async function handleTelegramTest(request: Request, env: Env): Promise<Response> {
-  // রিকোয়েস্ট বডিতে কাস্টম মেসেজ থাকলে সেটি নেওয়া হবে (না থাকলে ডিফল্ট মেসেজ)
   let customMessage = '';
   try {
     const body = (await request.json()) as { message?: unknown };
@@ -663,13 +725,240 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
   }
 }
 
+// এডমিন থেকে তাৎক্ষণিক আজকের ডেইলি ডাইজেস্ট পাঠানোর হ্যান্ডলার
+async function handleSendDailyDigest(env: Env): Promise<Response> {
+  const settings = await fetchTelegramSettings(env);
+  if (!settings.ok) {
+    return jsonResponse({ ok: false, error: settings.errorMessage }, 500);
+  }
+
+  if (!settings.botToken || !settings.chatId) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: 'ডাটাবেজে Telegram Bot Token বা Chat ID সেভ করা নেই। আগে সেটিংস সেভ করুন।',
+      },
+      400
+    );
+  }
+
+  // বাংলাদেশ সময় (Asia/Dhaka = UTC+6) অনুযায়ী আজকের শুরুর ISO সময় বের করা হচ্ছে
+  const now = new Date();
+  const dhakaDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' }).format(now);
+  const startOfDhakaDayUtc = new Date(`${dhakaDate}T00:00:00+06:00`).toISOString();
+
+  const [collegesRes, noticesRes] = await Promise.all([
+    supabaseRest<CollegeRecord[]>(
+      env,
+      'colleges?select=id,name,is_active,last_status,consecutive_failures'
+    ),
+    supabaseRest<DigestNoticeRow[]>(
+      env,
+      `notices?created_at=gte.${encodeURIComponent(startOfDhakaDayUtc)}&select=id,college_id,title,created_at,colleges(name)`
+    ),
+  ]);
+
+  if (!collegesRes.ok || !noticesRes.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        error:
+          collegesRes.errorMessage ||
+          noticesRes.errorMessage ||
+          'ডাইজেস্টের জন্য ডাটা সংগ্রহ করা যায়নি।',
+      },
+      500
+    );
+  }
+
+  const allColleges = collegesRes.data || [];
+  const activeColleges = allColleges.filter((c) => c.is_active);
+  const errorColleges = activeColleges.filter((c) => c.last_status === 'error');
+  const todayNotices = noticesRes.data || [];
+
+  const countsByCollege = new Map<string, { name: string; count: number }>();
+  for (const n of todayNotices) {
+    const collegeName = n.colleges?.name || 'অজানা কলেজ';
+    const current = countsByCollege.get(n.college_id) || { name: collegeName, count: 0 };
+    current.count += 1;
+    countsByCollege.set(n.college_id, current);
+  }
+
+  const lines: string[] = [
+    `📊 দৈনিক নোটিশ ডাইজেস্ট (${dhakaDate})`,
+    '',
+    `🏫 সক্রিয় কলেজ: ${activeColleges.length} টি`,
+    `📰 আজকের মোট নতুন নোটিশ: ${todayNotices.length} টি`,
+  ];
+
+  if (countsByCollege.size > 0) {
+    lines.push('', '📌 কলেজভিত্তিক সারসংক্ষেপ:');
+    for (const item of countsByCollege.values()) {
+      lines.push(`• ${item.name}: ${item.count} টি`);
+    }
+  } else {
+    lines.push('', 'ℹ️ আজ এখনো কোনো নতুন নোটিশ যুক্ত হয়নি।');
+  }
+
+  if (errorColleges.length > 0) {
+    lines.push('', `⚠️ স্ক্যান সমস্যাযুক্ত কলেজ (${errorColleges.length} টি):`);
+    for (const errCol of errorColleges) {
+      lines.push(`• ${errCol.name} (টানা ${errCol.consecutive_failures || 1} বার ব্যর্থ)`);
+    }
+  }
+
+  const digestText = lines.join('\n');
+  const cleanChatId = settings.chatId.replace(/^\./, '');
+
+  try {
+    const tgRes = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: cleanChatId,
+        text: digestText,
+        disable_web_page_preview: true,
+      }),
+    });
+
+    const tgData = (await tgRes.json().catch(() => ({}))) as {
+      ok?: boolean;
+      description?: string;
+    };
+
+    if (!tgRes.ok || !tgData.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: tgData.description || `ডাইজেস্ট পাঠানো যায়নি (HTTP ${tgRes.status})।`,
+        },
+        400
+      );
+    }
+
+    return jsonResponse({
+      ok: true,
+      message: `আজকের ডেইলি ডাইজেস্ট (${todayNotices.length} টি নোটিশ) সফলভাবে টেলিগ্রামে পাঠানো হয়েছে!`,
+      summary: {
+        date: dhakaDate,
+        active_colleges: activeColleges.length,
+        total_notices_today: todayNotices.length,
+      },
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return jsonResponse(
+      { ok: false, error: `টেলিগ্রাম সংযোগে সমস্যা হয়েছে: ${msg}` },
+      502
+    );
+  }
+}
+
 // ============================================================================
-// টেস্ট রান হ্যান্ডলারসমূহ (POST /api/admin/test-run ও GET /api/admin/test-run/:id)
+// GitHub Actions workflow_dispatch ট্রিগার হেল্পার (টেস্ট রান ও সব-স্ক্যান)
+// ============================================================================
+async function dispatchScraperWorkflow(
+  env: Env,
+  runId: string,
+  inputs: { mode: 'test' | 'normal'; college_id: string; test_run_id: string }
+): Promise<Response> {
+  const githubToken = (env.GITHUB_TOKEN || '').trim();
+  const githubRepo = normalizeGithubRepo(env.GITHUB_REPO);
+  const githubBranch = (env.GITHUB_BRANCH || 'main').trim() || 'main';
+
+  const dispatchUrl = `https://api.github.com/repos/${githubRepo}/actions/workflows/notice-check.yml/dispatches`;
+
+  try {
+    const ghRes = await fetch(dispatchUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${githubToken}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'nu-college-notice-worker',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ref: githubBranch,
+        inputs,
+      }),
+    });
+
+    if (!ghRes.ok) {
+      const ghBody = await ghRes.text().catch(() => '');
+      let ghMessage = `GitHub API ত্রুটি (HTTP ${ghRes.status})`;
+      try {
+        const ghJson = JSON.parse(ghBody) as { message?: string };
+        if (ghJson?.message) ghMessage = ghJson.message;
+      } catch {
+        // কাঁচা টেক্সট ইগনোর
+      }
+
+      await supabaseRest(env, `test_runs?id=eq.${encodeURIComponent(runId)}`, {
+        method: 'PATCH',
+        body: {
+          status: 'error',
+          updated_at: new Date().toISOString(),
+          result: {
+            mode: inputs.mode,
+            error: {
+              name: 'GitHubDispatchError',
+              message: `GitHub Actions ওয়ার্কফ্লো ট্রিগার করা যায়নি: ${ghMessage}`,
+              status: ghRes.status,
+            },
+          },
+        },
+      });
+
+      return jsonResponse(
+        {
+          error: `GitHub Actions ওয়ার্কফ্লো শুরু করতে ব্যর্থ হয়েছে: ${ghMessage}`,
+        },
+        502
+      );
+    }
+
+    return jsonResponse(
+      {
+        test_run_id: runId,
+        status: 'pending',
+        message:
+          inputs.mode === 'normal'
+            ? 'সব সক্রিয় কলেজের স্ক্যান শুরু হয়েছে। ফলাফল পেতে কয়েক সেকেন্ড অপেক্ষা করুন...'
+            : 'টেস্ট রান শুরু হয়েছে। ফলাফল পেতে কয়েক সেকেন্ড অপেক্ষা করুন...',
+      },
+      202
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await supabaseRest(env, `test_runs?id=eq.${encodeURIComponent(runId)}`, {
+      method: 'PATCH',
+      body: {
+        status: 'error',
+        updated_at: new Date().toISOString(),
+        result: {
+          mode: inputs.mode,
+          error: {
+            name: 'NetworkError',
+            message: `GitHub API সংযোগে ত্রুটি: ${msg}`,
+          },
+        },
+      },
+    });
+
+    return jsonResponse(
+      { error: `GitHub Actions-এ রিকোয়েস্ট পাঠাতে সমস্যা হয়েছে: ${msg}` },
+      502
+    );
+  }
+}
+
+// ============================================================================
+// টেস্ট রান ও সব-কলেজ স্ক্যান হ্যান্ডলারসমূহ
 // ============================================================================
 async function handleTriggerTestRun(request: Request, env: Env): Promise<Response> {
   const githubToken = (env.GITHUB_TOKEN || '').trim();
   const githubRepo = normalizeGithubRepo(env.GITHUB_REPO);
-  const githubBranch = (env.GITHUB_BRANCH || 'main').trim() || 'main';
 
   const missingGhSecrets: string[] = [];
   if (!githubToken) missingGhSecrets.push('GITHUB_TOKEN');
@@ -694,7 +983,6 @@ async function handleTriggerTestRun(request: Request, env: Env): Promise<Respons
     return jsonResponse({ error: 'সঠিক কলেজ ID দেওয়া হয়নি।' }, 400);
   }
 
-  // কলেজটি ডাটাবেজে আছে কিনা যাচাই করা হচ্ছে
   const collegeRes = await supabaseRest<CollegeRecord[]>(
     env,
     `colleges?id=eq.${encodeURIComponent(collegeId)}&select=id,name,notice_url`
@@ -709,7 +997,6 @@ async function handleTriggerTestRun(request: Request, env: Env): Promise<Respons
     return jsonResponse({ error: 'এই ID দিয়ে কোনো কলেজ খুঁজে পাওয়া যায়নি।' }, 404);
   }
 
-  // test_runs টেবিলে pending স্ট্যাটাসে নতুন সারি তৈরি করা হচ্ছে
   const createRunRes = await supabaseRest<TestRunRow[]>(env, 'test_runs', {
     method: 'POST',
     prefer: 'return=representation',
@@ -717,7 +1004,7 @@ async function handleTriggerTestRun(request: Request, env: Env): Promise<Respons
       {
         college_id: collegeId,
         status: 'pending',
-        result: null,
+        result: { mode: 'test' },
       },
     ],
   });
@@ -730,93 +1017,58 @@ async function handleTriggerTestRun(request: Request, env: Env): Promise<Respons
   }
 
   const testRun = createRunRes.data[0];
+  return dispatchScraperWorkflow(env, testRun.id, {
+    mode: 'test',
+    college_id: collegeId,
+    test_run_id: testRun.id,
+  });
+}
 
-  // GitHub Actions-এ workflow_dispatch ইভেন্ট পাঠানো হচ্ছে
-  const dispatchUrl = `https://api.github.com/repos/${githubRepo}/actions/workflows/notice-check.yml/dispatches`;
+// সব সক্রিয় কলেজ একসাথে স্ক্যান করার হ্যান্ডলার (POST /api/admin/scan-all)
+async function handleTriggerScanAll(env: Env): Promise<Response> {
+  const githubToken = (env.GITHUB_TOKEN || '').trim();
+  const githubRepo = normalizeGithubRepo(env.GITHUB_REPO);
 
-  try {
-    const ghRes = await fetch(dispatchUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${githubToken}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'nu-college-notice-worker',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        ref: githubBranch,
-        inputs: {
-          mode: 'test',
-          college_id: collegeId,
-          test_run_id: testRun.id,
-        },
-      }),
-    });
+  const missingGhSecrets: string[] = [];
+  if (!githubToken) missingGhSecrets.push('GITHUB_TOKEN');
+  if (!githubRepo) missingGhSecrets.push('GITHUB_REPO');
 
-    if (!ghRes.ok) {
-      const ghBody = await ghRes.text().catch(() => '');
-      let ghMessage = `GitHub API ত্রুটি (HTTP ${ghRes.status})`;
-      try {
-        const ghJson = JSON.parse(ghBody) as { message?: string };
-        if (ghJson?.message) ghMessage = ghJson.message;
-      } catch {
-        // কাঁচা টেক্সট ইগনোর
-      }
-
-      // ব্যর্থ হলে test_runs রেকর্ড আপডেট করে দেওয়া হচ্ছে যাতে UI-তে সাথে সাথে দেখা যায়
-      await supabaseRest(env, `test_runs?id=eq.${encodeURIComponent(testRun.id)}`, {
-        method: 'PATCH',
-        body: {
-          status: 'error',
-          updated_at: new Date().toISOString(),
-          result: {
-            error: {
-              name: 'GitHubDispatchError',
-              message: `GitHub Actions ওয়ার্কফ্লো ট্রিগার করা যায়নি: ${ghMessage}`,
-              status: ghRes.status,
-            },
-          },
-        },
-      });
-
-      return jsonResponse(
-        {
-          error: `GitHub Actions ওয়ার্কফ্লো শুরু করতে ব্যর্থ হয়েছে: ${ghMessage}`,
-        },
-        502
-      );
-    }
-
+  if (missingGhSecrets.length > 0) {
     return jsonResponse(
       {
-        test_run_id: testRun.id,
-        status: 'pending',
-        message: 'টেস্ট রান শুরু হয়েছে। ফলাফল পেতে কয়েক সেকেন্ড অপেক্ষা করুন...',
+        error: `Worker-এ প্রয়োজনীয় সিক্রেট (${missingGhSecrets.join(
+          ', '
+        )}) কনফিগার করা নেই। Cloudflare Worker > Settings > Variables and Secrets অংশে যোগ করুন।`,
       },
-      202
-    );
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    await supabaseRest(env, `test_runs?id=eq.${encodeURIComponent(testRun.id)}`, {
-      method: 'PATCH',
-      body: {
-        status: 'error',
-        updated_at: new Date().toISOString(),
-        result: {
-          error: {
-            name: 'NetworkError',
-            message: `GitHub API সংযোগে ত্রুটি: ${msg}`,
-          },
-        },
-      },
-    });
-
-    return jsonResponse(
-      { error: `GitHub Actions-এ রিকোয়েস্ট পাঠাতে সমস্যা হয়েছে: ${msg}` },
-      502
+      500
     );
   }
+
+  const createRunRes = await supabaseRest<TestRunRow[]>(env, 'test_runs', {
+    method: 'POST',
+    prefer: 'return=representation',
+    body: [
+      {
+        college_id: null,
+        status: 'pending',
+        result: { mode: 'normal' },
+      },
+    ],
+  });
+
+  if (!createRunRes.ok || !createRunRes.data || createRunRes.data.length === 0) {
+    return jsonResponse(
+      { error: `স্ক্যান রেকর্ড তৈরি করা যায়নি: ${createRunRes.errorMessage}` },
+      500
+    );
+  }
+
+  const scanRun = createRunRes.data[0];
+  return dispatchScraperWorkflow(env, scanRun.id, {
+    mode: 'normal',
+    college_id: '',
+    test_run_id: scanRun.id,
+  });
 }
 
 async function handleGetTestRun(env: Env, id: string): Promise<Response> {
@@ -887,13 +1139,25 @@ export default {
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 
-        // ৫. নির্দিষ্ট কলেজের জন্য টেস্ট রান শুরু করা
+        // ৫. ডেইলি ডাইজেস্ট রিপোর্ট পাঠানো
+        if (pathname === '/api/admin/daily-digest') {
+          if (request.method === 'POST') return handleSendDailyDigest(env);
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+
+        // ৬. সব সক্রিয় কলেজ একসাথে এখনই স্ক্যান করা
+        if (pathname === '/api/admin/scan-all') {
+          if (request.method === 'POST') return handleTriggerScanAll(env);
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+
+        // ৭. নির্দিষ্ট কলেজের জন্য টেস্ট রান শুরু করা
         if (pathname === '/api/admin/test-run') {
           if (request.method === 'POST') return handleTriggerTestRun(request, env);
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 
-        // ৬. নির্দিষ্ট টেস্ট রানের ফলাফল পোল করা
+        // ৮. নির্দিষ্ট টেস্ট রানের ফলাফল পোল করা
         const testRunIdMatch = pathname.match(/^\/api\/admin\/test-run\/([^/]+)$/);
         if (testRunIdMatch) {
           const runId = decodeURIComponent(testRunIdMatch[1]);

@@ -7,10 +7,25 @@ create table if not exists colleges (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   notice_url text not null,
-  selector_config jsonb not null, -- { "row_selector": "...", "title_selector": "...", "link_selector": "...", "date_selector": "..." }
+  selector_config jsonb not null,
   is_active boolean default true,
+  telegram_chat_id text,
+  telegram_thread_id integer,
+  last_checked_at timestamptz,
+  last_status text default 'unknown',
+  last_error text,
+  consecutive_failures integer default 0,
   created_at timestamptz default now()
 );
+
+-- পুরনো টেবিলে নতুন কলাম যোগ করার নিরাপদ মাইগ্রেশন
+alter table public.colleges
+  add column if not exists telegram_chat_id text,
+  add column if not exists telegram_thread_id integer,
+  add column if not exists last_checked_at timestamptz,
+  add column if not exists last_status text default 'unknown',
+  add column if not exists last_error text,
+  add column if not exists consecutive_failures integer default 0;
 
 -- 2. Create Notices Table
 create table if not exists notices (
@@ -35,7 +50,7 @@ create index if not exists idx_colleges_active on colleges(is_active);
 alter table colleges enable row level security;
 alter table notices enable row level security;
 
--- Allow public (anon / publishable key) read access for Cloudflare Pages frontend
+-- Allow public (anon / publishable key) read access for frontend
 drop policy if exists "Allow public read access on colleges" on colleges;
 create policy "Allow public read access on colleges"
   on colleges for select
@@ -48,7 +63,7 @@ create policy "Allow public read access on notices"
   to anon, authenticated
   using (true);
 
--- 3. Create Settings Table (Admin Telegram Bot Token & Chat ID)
+-- 3. Create Settings Table (Admin Telegram Bot Token, Chat ID & Digest state)
 -- শুধুমাত্র service_role key ব্যবহার করে Worker ও Scraper এই টেবিল পড়তে/লিখতে পারবে
 create table if not exists settings (
   key text primary key,
@@ -56,7 +71,7 @@ create table if not exists settings (
   updated_at timestamptz default now()
 );
 
--- 4. Create Test Runs Table (On-demand college scraper test tracking)
+-- 4. Create Test Runs Table (On-demand college test & scan-all tracking)
 -- শুধুমাত্র service_role key ব্যবহার করে Worker ও Scraper এই টেবিল পড়তে/লিখতে পারবে
 create table if not exists test_runs (
   id uuid primary key default gen_random_uuid(),
