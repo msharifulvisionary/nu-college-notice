@@ -9,6 +9,7 @@ import { NoticeHistory } from './components/NoticeHistory';
 import { TelegramTester } from './components/TelegramTester';
 import { ScanLogsTab } from './components/ScanLogsTab';
 import {
+  AdminBroadcastPayload,
   AutomationStatusResponse,
   College,
   CollegePayload,
@@ -35,6 +36,7 @@ import {
   saveAdminSettings,
   sendAdminTelegramTest,
   sendAdminDailyDigest,
+  sendAdminBroadcast,
   triggerAdminScanAll,
   triggerAdminTestRun,
   triggerAdminCollegeBaseline,
@@ -578,6 +580,11 @@ export default function App() {
     [handleUnauthorized]
   );
 
+  const handleSendBroadcast = useCallback(
+    (payload: AdminBroadcastPayload) => sendAdminBroadcast(payload, handleUnauthorized),
+    [handleUnauthorized]
+  );
+
   const handleLoadWebhookStatus = useCallback(
     () => fetchAdminTelegramWebhook(handleUnauthorized),
     [handleUnauthorized]
@@ -786,6 +793,7 @@ export default function App() {
             onSaveSettings={handleSaveTelegramSettings}
             onTestTelegram={handleSendTelegramTest}
             onSendDailyDigest={handleSendDailyDigest}
+            onSendBroadcast={handleSendBroadcast}
             onLoadWebhookStatus={handleLoadWebhookStatus}
             onRegisterWebhook={handleRegisterWebhook}
           />

@@ -1,4 +1,6 @@
 import {
+  AdminBroadcastPayload,
+  AdminBroadcastResponse,
   AutomationStatusResponse,
   College,
   CollegePayload,
@@ -179,6 +181,20 @@ export async function sendAdminDailyDigest(
   return adminRequest<{ ok: boolean; message?: string; error?: string }>(
     '/api/admin/daily-digest',
     { method: 'POST' },
+    onUnauthorized
+  );
+}
+
+export async function sendAdminBroadcast(
+  payload: AdminBroadcastPayload,
+  onUnauthorized?: UnauthorizedHandler
+): Promise<AdminBroadcastResponse> {
+  return adminRequest<AdminBroadcastResponse>(
+    '/api/admin/broadcast',
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
     onUnauthorized
   );
 }

@@ -4,7 +4,6 @@ import {
   Building2,
   Search,
   ExternalLink,
-  Send,
   Calendar,
   Globe,
   Radio,
@@ -14,6 +13,9 @@ import {
   ChevronDown,
   ChevronUp,
   Code2,
+  Copy,
+  Check,
+  Share2,
 } from 'lucide-react';
 import { College, Notice } from '../types';
 import { sortNoticesByDateDesc } from '../lib/dateSort';
@@ -27,6 +29,34 @@ interface HomePageProps {
   dataError?: string | null;
   isAdminLoggedIn: boolean;
   onGoToAdminPanel: () => void;
+}
+
+type NoticeCategoryId = 'all' | 'exam_routine' | 'form_fillup' | 'admission' | 'result';
+
+const NOTICE_CATEGORIES: Array<{ id: NoticeCategoryId; label: string }> = [
+  { id: 'all', label: 'সব' },
+  { id: 'exam_routine', label: 'পরীক্ষা ও রুটিন' },
+  { id: 'form_fillup', label: 'ফরম পূরণ' },
+  { id: 'admission', label: 'ভর্তি' },
+  { id: 'result', label: 'ফলাফল' },
+];
+
+function matchesNoticeCategory(title: string, category: NoticeCategoryId): boolean {
+  if (category === 'all') return true;
+  const lower = title.toLowerCase();
+  if (category === 'form_fillup') {
+    return /ফরম|ফর্ম|form\s*fill|form\s*up/i.test(lower);
+  }
+  if (category === 'exam_routine') {
+    return /পরীক্ষা|রুটিন|সময়সূচ|সময়সূচ|exam|routine|schedule|স্থগিত|সংশোধিত/i.test(lower);
+  }
+  if (category === 'admission') {
+    return /ভর্তি|admission|মেধা\s*তালিকা|merit/i.test(lower);
+  }
+  if (category === 'result') {
+    return /ফলাফল|ফল|রেজাল্ট|result/i.test(lower);
+  }
+  return true;
 }
 
 const INITIAL_NOTICE_COUNT = 6;
@@ -44,6 +74,8 @@ export const HomePage: React.FC<HomePageProps> = ({
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCollegeId, setSelectedCollegeId] = useState<string>('all');
+  const [selectedCategory, setSelectedCategory] = useState<NoticeCategoryId>('all');
+  const [copiedNoticeId, setCopiedNoticeId] = useState<string | null>(null);
   const [logoClicks, setLogoClicks] = useState<number>(0);
   const [visibleCount, setVisibleCount] = useState<number>(INITIAL_NOTICE_COUNT);
 
@@ -52,7 +84,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   // সার্চ বা ফিল্টার বদলালে দেখানোর সংখ্যা রিসেট করা
   useEffect(() => {
     setVisibleCount(INITIAL_NOTICE_COUNT);
-  }, [searchTerm, selectedCollegeId]);
+  }, [searchTerm, selectedCollegeId, selectedCategory]);
 
   // লোগোতে ৫ বার ক্লিক করলে এডমিন প্যানেল ওপেন হবে
   const handleLogoClick = () => {
@@ -72,6 +104,35 @@ export const HomePage: React.FC<HomePageProps> = ({
   // প্রকৃত তারিখ অনুযায়ী নতুন থেকে পুরোনো ক্রমে সাজানো
   const sortedNotices = useMemo(() => sortNoticesByDateDesc(notices), [notices]);
 
+  // প্রতিটি ক্যাটাগরিতে কয়টি নোটিশ আছে তা গণনা (সার্চ ও কলেজ অনুযায়ী)
+  const categoryCounts = useMemo(() => {
+    const baseFiltered = sortedNotices.filter((notice) => {
+      const matchesSearch =
+        notice.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (notice.college_name && notice.college_name.toLowerCase().includes(searchTerm.toLowerCase()));
+      const matchesCollege =
+        selectedCollegeId === 'all' || notice.college_id === selectedCollegeId;
+      return matchesSearch && matchesCollege;
+    });
+
+    const counts: Record<NoticeCategoryId, number> = {
+      all: baseFiltered.length,
+      exam_routine: 0,
+      form_fillup: 0,
+      admission: 0,
+      result: 0,
+    };
+
+    for (const notice of baseFiltered) {
+      if (matchesNoticeCategory(notice.title, 'exam_routine')) counts.exam_routine += 1;
+      if (matchesNoticeCategory(notice.title, 'form_fillup')) counts.form_fillup += 1;
+      if (matchesNoticeCategory(notice.title, 'admission')) counts.admission += 1;
+      if (matchesNoticeCategory(notice.title, 'result')) counts.result += 1;
+    }
+
+    return counts;
+  }, [sortedNotices, searchTerm, selectedCollegeId]);
+
   // নোটিশ ফিল্টার
   const filteredNotices = sortedNotices.filter((notice) => {
     const matchesSearch =
@@ -81,8 +142,23 @@ export const HomePage: React.FC<HomePageProps> = ({
     const matchesCollege =
       selectedCollegeId === 'all' || notice.college_id === selectedCollegeId;
 
-    return matchesSearch && matchesCollege;
+    const matchesCategory = matchesNoticeCategory(notice.title, selectedCategory);
+
+    return matchesSearch && matchesCollege && matchesCategory;
   });
+
+  const handleCopyNotice = async (notice: Notice) => {
+    const shareText = `${notice.college_name ? `${notice.college_name} — ` : ''}${notice.title}${notice.date ? ` (${notice.date})` : ''}\n${notice.link}`;
+    try {
+      await navigator.clipboard.writeText(shareText);
+      setCopiedNoticeId(notice.id);
+      window.setTimeout(() => {
+        setCopiedNoticeId((prev) => (prev === notice.id ? null : prev));
+      }, 2000);
+    } catch {
+      // Clipboard blocked fallback ignored cleanly
+    }
+  };
 
   const visibleNotices = filteredNotices.slice(0, visibleCount);
   const remainingCount = Math.max(0, filteredNotices.length - visibleCount);
@@ -171,12 +247,12 @@ export const HomePage: React.FC<HomePageProps> = ({
           {/* Quick Stats Grid */}
           <div className="pt-3 grid grid-cols-2 sm:grid-cols-4 gap-3 max-w-2xl mx-auto">
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-center">
-              <p className="text-lg sm:text-xl font-extrabold text-slate-900">{activeColleges.length} টি</p>
+              <p className="text-lg sm:text-xl font-extrabold text-slate-900 tabular-nums">{activeColleges.length} টি</p>
               <p className="text-[11px] text-slate-500 font-medium">সক্রিয় কলেজ</p>
             </div>
 
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-center">
-              <p className="text-lg sm:text-xl font-extrabold text-slate-900">{notices.length} টি</p>
+              <p className="text-lg sm:text-xl font-extrabold text-slate-900 tabular-nums">{notices.length} টি</p>
               <p className="text-[11px] text-slate-500 font-medium">সংগৃহীত নোটিশ</p>
             </div>
 
@@ -205,13 +281,13 @@ export const HomePage: React.FC<HomePageProps> = ({
               </p>
             </div>
 
-            <div className="text-xs font-semibold text-slate-600 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-xs self-start sm:self-auto">
+            <div className="text-xs font-semibold text-slate-600 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-xs self-start sm:self-auto tabular-nums">
               প্রদর্শিত: <span className="text-emerald-600 font-bold">{visibleNotices.length}</span> / {filteredNotices.length} টি
             </div>
           </div>
 
           {/* Search Controls */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5 bg-white p-3 border border-slate-200 rounded-2xl shadow-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3.5 bg-white p-3 border border-slate-200 rounded-2xl shadow-xs">
             <div className="relative sm:col-span-2">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
               <input
@@ -239,6 +315,34 @@ export const HomePage: React.FC<HomePageProps> = ({
             </div>
           </div>
 
+          {/* Interactive Category Filter Buttons */}
+          <div className="flex flex-wrap items-center gap-2 mb-5">
+            {NOTICE_CATEGORIES.map((cat) => {
+              const isSelected = selectedCategory === cat.id;
+              return (
+                <button
+                  key={cat.id}
+                  type="button"
+                  onClick={() => setSelectedCategory(cat.id)}
+                  className={`inline-flex items-center space-x-1.5 px-3.5 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                    isSelected
+                      ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                      : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:text-slate-900'
+                  }`}
+                >
+                  <span>{cat.label}</span>
+                  <span
+                    className={`text-[10px] font-semibold tabular-nums ${
+                      isSelected ? 'text-emerald-100' : 'text-slate-400'
+                    }`}
+                  >
+                    ({categoryCounts[cat.id]})
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
           {/* Notice Grid List */}
           {filteredNotices.length === 0 ? (
             <div className="bg-white border border-slate-200 rounded-2xl p-8 sm:p-12 text-center text-slate-500">
@@ -249,48 +353,80 @@ export const HomePage: React.FC<HomePageProps> = ({
           ) : (
             <>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {visibleNotices.map((notice) => (
-                  <div
-                    key={notice.id}
-                    className="bg-white border border-slate-200 hover:border-emerald-300 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all flex flex-col justify-between"
-                  >
-                    <div>
-                      <div className="flex items-center justify-between gap-2 mb-2.5">
-                        <span className="px-2.5 py-0.5 text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg truncate max-w-[180px]">
-                          {notice.college_name || 'Govt. College'}
-                        </span>
+                {visibleNotices.map((notice) => {
+                  const shareText = `${notice.college_name ? `${notice.college_name} — ` : ''}${notice.title}${notice.date ? ` (${notice.date})` : ''}\n${notice.link}`;
+                  const whatsappHref = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
+                  const isCopied = copiedNoticeId === notice.id;
 
-                        {notice.date && (
-                          <span className="text-[11px] text-slate-500 flex items-center space-x-1 font-medium shrink-0 tabular-nums">
-                            <Calendar className="w-3 h-3 text-slate-400" />
-                            <span>{notice.date}</span>
+                  return (
+                    <div
+                      key={notice.id}
+                      className="bg-white border border-slate-200 hover:border-emerald-300 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all flex flex-col justify-between"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-2 mb-2.5">
+                          <span className="text-[11px] font-bold text-emerald-800 truncate max-w-[180px]">
+                            {notice.college_name || 'Govt. College'}
                           </span>
-                        )}
+
+                          {notice.date && (
+                            <span className="text-[11px] text-slate-500 flex items-center space-x-1 font-medium shrink-0 tabular-nums">
+                              <Calendar className="w-3 h-3 text-slate-400" />
+                              <span>{notice.date}</span>
+                            </span>
+                          )}
+                        </div>
+
+                        <h3 className="text-xs sm:text-sm font-bold text-slate-900 leading-relaxed line-clamp-3 mb-3">
+                          {notice.title}
+                        </h3>
                       </div>
 
-                      <h3 className="text-xs sm:text-sm font-bold text-slate-900 leading-relaxed line-clamp-3 mb-3">
-                        {notice.title}
-                      </h3>
-                    </div>
+                      <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2 mt-2">
+                        <div className="flex items-center space-x-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleCopyNotice(notice)}
+                            className={`inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                              isCopied
+                                ? 'bg-emerald-600 text-white border-emerald-600'
+                                : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                            }`}
+                            title="নোটিশের শিরোনাম ও লিংক কপি করুন"
+                          >
+                            {isCopied ? (
+                              <Check className="w-3 h-3" />
+                            ) : (
+                              <Copy className="w-3 h-3 text-slate-500" />
+                            )}
+                            <span>{isCopied ? 'কপি হয়েছে' : 'কপি'}</span>
+                          </button>
 
-                    <div className="pt-3 border-t border-slate-100 flex items-center justify-between mt-2">
-                      <span className="inline-flex items-center space-x-1 text-[11px] text-sky-700 font-medium bg-sky-50 px-2 py-0.5 rounded-md">
-                        <Send className="w-3 h-3 text-sky-600" />
-                        <span>টেলিগ্রাম নোটিশ</span>
-                      </span>
+                          <a
+                            href={whatsappHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition-colors whitespace-nowrap shrink-0"
+                            title="হোয়াটসঅ্যাপে শেয়ার করুন"
+                          >
+                            <Share2 className="w-3 h-3" />
+                            <span>শেয়ার</span>
+                          </a>
+                        </div>
 
-                      <a
-                        href={notice.link}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center space-x-1 text-xs font-bold text-emerald-600 hover:text-emerald-700 hover:underline"
-                      >
-                        <span>মূল নোটিশ</span>
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </a>
+                        <a
+                          href={notice.link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center space-x-1 text-xs font-bold text-emerald-600 hover:text-emerald-700 hover:underline whitespace-nowrap shrink-0"
+                        >
+                          <span>মূল নোটিশ</span>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </a>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               {/* See More / Show Less Controls */}

@@ -148,6 +148,21 @@ function cleanOptionalChatId(raw: unknown): string | null {
   return trimmed || null;
 }
 
+// কমা বা নতুন লাইন দিয়ে আলাদা করা একাধিক Chat ID পার্স করার হেল্পার
+function parseWorkerChatIdList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  const seen = new Set<string>();
+  const list: string[] = [];
+  for (const part of raw.split(/[,\n]+/)) {
+    const clean = part.trim().replace(/^\./, '');
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      list.push(clean);
+    }
+  }
+  return list;
+}
+
 // Supabase PostgREST API কল করার হেল্পার (Service Role Key সহ)
 async function supabaseRest<T>(
   env: Env,
@@ -712,53 +727,72 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
     );
   }
 
-  const cleanChatId = settings.chatId.replace(/^\./, '');
+  const chatIds = parseWorkerChatIdList(settings.chatId);
+  if (chatIds.length === 0) {
+    return jsonResponse(
+      { ok: false, error: 'সঠিক Telegram Chat ID পাওয়া যায়নি।' },
+      400
+    );
+  }
+
   const textToSend =
     customMessage ||
     '🧪 টেস্ট নোটিফিকেশন: Multi-College Notice Tracker ও টেলিগ্রাম বট সঠিকভাবে যুক্ত আছে!';
 
-  try {
-    const tgRes = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: cleanChatId,
-        text: textToSend,
-        disable_web_page_preview: false,
-      }),
-    });
+  let sentCount = 0;
+  let lastError = '';
+  let lastTgData: { ok?: boolean; description?: string; error_code?: number } = {};
 
-    const tgData = (await tgRes.json().catch(() => ({}))) as {
-      ok?: boolean;
-      description?: string;
-      error_code?: number;
-    };
+  for (const cid of chatIds) {
+    try {
+      const tgRes = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: cid,
+          text: textToSend,
+          disable_web_page_preview: false,
+        }),
+      });
 
-    if (!tgRes.ok || !tgData.ok) {
-      return jsonResponse(
-        {
-          ok: false,
-          error:
-            tgData.description ||
-            `টেলিগ্রাম মেসেজ পাঠানো যায়নি (HTTP ${tgRes.status})। টোকেন ও চ্যাট আইডি যাচাই করুন।`,
-          telegram_response: tgData,
-        },
-        400
-      );
+      const tgData = (await tgRes.json().catch(() => ({}))) as {
+        ok?: boolean;
+        description?: string;
+        error_code?: number;
+      };
+      lastTgData = tgData;
+
+      if (tgRes.ok && tgData.ok) {
+        sentCount += 1;
+      } else {
+        lastError =
+          tgData.description ||
+          `টেলিগ্রাম মেসেজ পাঠানো যায়নি (HTTP ${tgRes.status})। টোকেন ও চ্যাট আইডি যাচাই করুন।`;
+      }
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err.message : String(err);
     }
+  }
 
-    return jsonResponse({
-      ok: true,
-      message: 'টেলিগ্রাম টেস্ট মেসেজ সফলভাবে পাঠানো হয়েছে!',
-      telegram_response: { ok: true },
-    });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+  if (sentCount === 0) {
     return jsonResponse(
-      { ok: false, error: `টেলিগ্রাম API-এর সাথে সংযোগ ব্যর্থ হয়েছে: ${msg}` },
-      502
+      {
+        ok: false,
+        error: lastError || 'টেলিগ্রাম API-এর সাথে সংযোগ ব্যর্থ হয়েছে।',
+        telegram_response: lastTgData,
+      },
+      400
     );
   }
+
+  return jsonResponse({
+    ok: true,
+    message:
+      chatIds.length > 1
+        ? `টেলিগ্রাম টেস্ট মেসেজ ${sentCount}/${chatIds.length}টি চ্যাটে সফলভাবে পাঠানো হয়েছে!`
+        : 'টেলিগ্রাম টেস্ট মেসেজ সফলভাবে পাঠানো হয়েছে!',
+    telegram_response: { ok: true },
+  });
 }
 
 // এডমিন থেকে তাৎক্ষণিক আজকের ডেইলি ডাইজেস্ট পাঠানোর হ্যান্ডলার
@@ -844,50 +878,246 @@ async function handleSendDailyDigest(env: Env): Promise<Response> {
   }
 
   const digestText = lines.join('\n');
-  const cleanChatId = settings.chatId.replace(/^\./, '');
+  const chatIds = parseWorkerChatIdList(settings.chatId);
+  if (chatIds.length === 0) {
+    return jsonResponse({ ok: false, error: 'সঠিক Telegram Chat ID পাওয়া যায়নি।' }, 400);
+  }
 
-  try {
-    const tgRes = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: cleanChatId,
-        text: digestText,
-        disable_web_page_preview: true,
-      }),
-    });
+  let sentCount = 0;
+  let lastError = '';
 
-    const tgData = (await tgRes.json().catch(() => ({}))) as {
-      ok?: boolean;
-      description?: string;
-    };
+  for (const cid of chatIds) {
+    try {
+      const tgRes = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: cid,
+          text: digestText,
+          disable_web_page_preview: true,
+        }),
+      });
 
-    if (!tgRes.ok || !tgData.ok) {
+      const tgData = (await tgRes.json().catch(() => ({}))) as {
+        ok?: boolean;
+        description?: string;
+      };
+
+      if (tgRes.ok && tgData.ok) {
+        sentCount += 1;
+      } else {
+        lastError = tgData.description || `ডাইজেস্ট পাঠানো যায়নি (HTTP ${tgRes.status})।`;
+      }
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (sentCount === 0) {
+    return jsonResponse(
+      { ok: false, error: lastError || 'টেলিগ্রাম সংযোগে সমস্যা হয়েছে।' },
+      400
+    );
+  }
+
+  return jsonResponse({
+    ok: true,
+    message: `আজকের ডেইলি ডাইজেস্ট (${todayNotices.length} টি নোটিশ) সফলভাবে ${sentCount}টি টেলিগ্রাম চ্যাটে পাঠানো হয়েছে!`,
+    summary: {
+      date: dhakaDate,
+      active_colleges: activeColleges.length,
+      total_notices_today: todayNotices.length,
+    },
+  });
+}
+
+// এডমিন ম্যানুয়াল ব্রডকাস্ট প্যানেল হ্যান্ডলার (POST /api/admin/broadcast)
+async function handleAdminBroadcast(request: Request, env: Env): Promise<Response> {
+  const settings = await fetchTelegramSettings(env);
+  if (!settings.ok) {
+    return jsonResponse({ ok: false, error: settings.errorMessage }, 500);
+  }
+
+  if (!settings.botToken) {
+    return jsonResponse(
+      { ok: false, error: 'আগে Telegram Bot Token ও Chat ID সেভ করুন।' },
+      400
+    );
+  }
+
+  const parsed = await parseJsonBody<{
+    message?: unknown;
+    image_url?: unknown;
+    target?: unknown;
+    custom_chat_ids?: unknown;
+  }>(request);
+  if (parsed.errorResponse || !parsed.data) return parsed.errorResponse as Response;
+
+  const rawMessage = typeof parsed.data.message === 'string' ? parsed.data.message.trim() : '';
+  const rawImageUrl = typeof parsed.data.image_url === 'string' ? parsed.data.image_url.trim() : '';
+  const targetMode =
+    parsed.data.target === 'default' || parsed.data.target === 'custom' ? parsed.data.target : 'all';
+  const customChatIdsRaw =
+    typeof parsed.data.custom_chat_ids === 'string' ? parsed.data.custom_chat_ids.trim() : '';
+
+  if (!rawMessage) {
+    return jsonResponse({ ok: false, error: 'ব্রডকাস্ট মেসেজ ফাঁকা রাখা যাবে না।' }, 400);
+  }
+
+  if (rawImageUrl) {
+    try {
+      const imgUrl = new URL(rawImageUrl);
+      if (imgUrl.protocol !== 'http:' && imgUrl.protocol !== 'https:') {
+        return jsonResponse({ ok: false, error: 'সঠিক HTTP বা HTTPS ইমেজ URL দিন।' }, 400);
+      }
+    } catch {
+      return jsonResponse({ ok: false, error: 'ইমেজ URL ফরম্যাট সঠিক নয়।' }, 400);
+    }
+  }
+
+  const targetMap = new Map<string, { chatId: string; threadId?: number }>();
+  const addTarget = (cid: string, threadId?: number | null) => {
+    const clean = cid.trim().replace(/^\./, '');
+    if (!clean) return;
+    const key = `${clean}:${threadId && threadId > 0 ? threadId : ''}`;
+    if (!targetMap.has(key)) {
+      targetMap.set(key, {
+        chatId: clean,
+        ...(threadId && threadId > 0 ? { threadId } : {}),
+      });
+    }
+  };
+
+  if (targetMode === 'custom') {
+    for (const cid of parseWorkerChatIdList(customChatIdsRaw)) {
+      addTarget(cid);
+    }
+    if (targetMap.size === 0) {
       return jsonResponse(
-        {
-          ok: false,
-          error: tgData.description || `ডাইজেস্ট পাঠানো যায়নি (HTTP ${tgRes.status})।`,
-        },
+        { ok: false, error: 'কাস্টম ব্রডকাস্টের জন্য অন্তত একটি Chat ID দিন।' },
         400
       );
     }
+  } else {
+    for (const cid of parseWorkerChatIdList(settings.chatId)) {
+      addTarget(cid);
+    }
+    if (targetMode === 'all') {
+      const collegesRes = await supabaseRest<CollegeRecord[]>(
+        env,
+        'colleges?is_active=eq.true&select=telegram_chat_id,telegram_thread_id'
+      );
+      if (collegesRes.ok && collegesRes.data) {
+        for (const col of collegesRes.data) {
+          const customList = parseWorkerChatIdList(col.telegram_chat_id);
+          customList.forEach((cid, idx) => {
+            addTarget(cid, idx === 0 ? col.telegram_thread_id : undefined);
+          });
+        }
+      }
+    }
+  }
 
-    return jsonResponse({
-      ok: true,
-      message: `আজকের ডেইলি ডাইজেস্ট (${todayNotices.length} টি নোটিশ) সফলভাবে টেলিগ্রামে পাঠানো হয়েছে!`,
-      summary: {
-        date: dhakaDate,
-        active_colleges: activeColleges.length,
-        total_notices_today: todayNotices.length,
-      },
-    });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+  const targets = Array.from(targetMap.values());
+  if (targets.length === 0) {
     return jsonResponse(
-      { ok: false, error: `টেলিগ্রাম সংযোগে সমস্যা হয়েছে: ${msg}` },
-      502
+      { ok: false, error: 'কোনো ডিফল্ট বা যুক্ত টেলিগ্রাম চ্যানেল/গ্রুপ পাওয়া যায়নি।' },
+      400
     );
   }
+
+  let sentCount = 0;
+  let failedCount = 0;
+  let lastError = '';
+
+  const formattedBroadcast = `📢 এডমিন ঘোষণা\n\n${rawMessage}`;
+
+  for (const target of targets) {
+    let delivered = false;
+    if (rawImageUrl) {
+      const caption =
+        formattedBroadcast.length > 1000
+          ? `${formattedBroadcast.slice(0, 997)}...`
+          : formattedBroadcast;
+      const photoBody: Record<string, unknown> = {
+        chat_id: target.chatId,
+        photo: rawImageUrl,
+        caption,
+      };
+      if (target.threadId) photoBody.message_thread_id = target.threadId;
+
+      try {
+        const pRes = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendPhoto`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(photoBody),
+        });
+        const pJson = (await pRes.json().catch(() => ({}))) as { ok?: boolean; description?: string };
+        if (pRes.ok && pJson.ok) {
+          delivered = true;
+        } else {
+          lastError = pJson.description || `Photo HTTP ${pRes.status}`;
+        }
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    if (!delivered) {
+      const msgBody: Record<string, unknown> = {
+        chat_id: target.chatId,
+        text: rawImageUrl ? `${formattedBroadcast}\n\n🖼️ ছবি: ${rawImageUrl}` : formattedBroadcast,
+        disable_web_page_preview: false,
+      };
+      if (target.threadId) msgBody.message_thread_id = target.threadId;
+
+      try {
+        const mRes = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(msgBody),
+        });
+        const mJson = (await mRes.json().catch(() => ({}))) as { ok?: boolean; description?: string };
+        if (mRes.ok && mJson.ok) {
+          delivered = true;
+        } else {
+          lastError = mJson.description || `HTTP ${mRes.status}`;
+        }
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    if (delivered) {
+      sentCount += 1;
+    } else {
+      failedCount += 1;
+    }
+  }
+
+  if (sentCount === 0) {
+    return jsonResponse(
+      {
+        ok: false,
+        sent_count: 0,
+        total_targets: targets.length,
+        failed_count: failedCount,
+        error: lastError || 'কোনো গ্রুপ বা চ্যানেলে ব্রডকাস্ট পাঠানো যায়নি।',
+      },
+      400
+    );
+  }
+
+  return jsonResponse({
+    ok: true,
+    sent_count: sentCount,
+    total_targets: targets.length,
+    failed_count: failedCount,
+    message:
+      failedCount > 0
+        ? `মোট ${sentCount}/${targets.length}টি গ্রুপ/চ্যানেলে ব্রডকাস্ট পাঠানো হয়েছে (${failedCount}টি ব্যর্থ)।`
+        : `সফলভাবে সবগুলো (${sentCount}টি) গ্রুপ/চ্যানেলে ঘোষণা ব্রডকাস্ট করা হয়েছে!`,
+  });
 }
 
 // ============================================================================
@@ -1666,18 +1896,26 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
     return jsonResponse({ ok: true });
   }
 
+  interface WorkerSubscriptionItem {
+    chat_id: string;
+    name?: string;
+    keywords: string[];
+    created_at?: string;
+  }
+
   let update: {
     message?: {
       message_id?: number;
       message_thread_id?: number;
       text?: string;
-      chat?: { id?: number | string; type?: string };
+      from?: { first_name?: string; username?: string };
+      chat?: { id?: number | string; type?: string; title?: string };
     };
     channel_post?: {
       message_id?: number;
       message_thread_id?: number;
       text?: string;
-      chat?: { id?: number | string; type?: string };
+      chat?: { id?: number | string; type?: string; title?: string };
     };
   };
 
@@ -1709,11 +1947,15 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
     const helpLines = [
       '🔔 <b>জাতীয় বিশ্ববিদ্যালয় ও কলেজ নোটিশ বট</b>',
       '',
-      'নিচের কমান্ডগুলো ব্যবহার করে যেকোনো সময় সর্বশেষ নোটিশ দেখতে পারবেন:',
+      'নিচের কমান্ডগুলো ব্যবহার করে যেকোনো সময় সর্বশেষ নোটিশ দেখতে ও অ্যালার্ট চালু করতে পারবেন:',
       '• /latest — সর্বশেষ ৮টি নোটিশ দেখুন',
       '• /latest 10 — সর্বশেষ ১০টি নোটিশ দেখুন (৫–১০)',
       '• /notice &lt;কলেজ বা বিষয়&gt; — নির্দিষ্ট কলেজ বা কীওয়ার্ড দিয়ে খুঁজুন',
       '  <i>উদাহরণ:</i> <code>/notice ফরম</code> বা <code>/notice আজিজুল</code>',
+      '• /subscribe &lt;কলেজ বা বিষয়&gt; — পার্সোনাল নোটিশ অ্যালার্ট চালু করুন',
+      '  <i>উদাহরণ:</i> <code>/subscribe আজিজুল</code> বা <code>/subscribe ফরম</code>',
+      '• /subscriptions — আপনার চালু থাকা সাবস্ক্রিপশন দেখুন',
+      '• /unsubscribe [কীওয়ার্ড] — সাবস্ক্রিপশন বাতিল করুন',
       '• /colleges — সংযুক্ত সক্রিয় কলেজগুলোর তালিকা দেখুন',
       '• /help — কমান্ড সহায়িকা দেখুন',
     ];
@@ -1721,6 +1963,161 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
     await sendTelegramBotReply(botToken, {
       chat_id: chatId,
       text: helpLines.join('\n'),
+      message_thread_id: msg.message_thread_id,
+      reply_to_message_id: replyToMessageId,
+    });
+    return jsonResponse({ ok: true });
+  }
+
+  if (command === 'subscribe' || command === 'unsubscribe' || command === 'subscriptions' || command === 'mysubs') {
+    const subQuery = await supabaseRest<SettingRow[]>(
+      env,
+      'settings?key=eq.telegram_subscriptions&select=key,value'
+    );
+    let subscriptions: WorkerSubscriptionItem[] = [];
+    if (subQuery.ok && subQuery.data?.[0]?.value) {
+      try {
+        const parsedSubs = JSON.parse(subQuery.data[0].value);
+        if (Array.isArray(parsedSubs)) {
+          subscriptions = parsedSubs;
+        }
+      } catch {
+        subscriptions = [];
+      }
+    }
+
+    const chatKey = String(chatId);
+    const existingIdx = subscriptions.findIndex((s) => String(s.chat_id) === chatKey);
+
+    if (command === 'subscriptions' || command === 'mysubs') {
+      const currentKeywords = existingIdx >= 0 ? subscriptions[existingIdx].keywords || [] : [];
+      const text =
+        currentKeywords.length > 0
+          ? `⭐ <b>আপনার সক্রিয় নোটিশ সাবস্ক্রিপশনসমূহ:</b>\n\n${currentKeywords
+              .map((kw, i) => `${toBengaliNumber(i + 1)}. <code>${escapeTelegramHtml(kw)}</code>`)
+              .join('\n')}\n\n❌ বাদ দিতে লিখুন: <code>/unsubscribe কীওয়ার্ড</code> বা সব বাদ দিতে <code>/unsubscribe সব</code>`
+          : 'ℹ️ আপনার কোনো পার্সোনাল সাবস্ক্রিপশন চালু নেই।\n\nনতুন অ্যালার্ট পেতে লিখুন:\n<code>/subscribe আজিজুল</code> অথবা <code>/subscribe ফরম</code>';
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text,
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    if (command === 'subscribe') {
+      if (!rawArg) {
+        await sendTelegramBotReply(botToken, {
+          chat_id: chatId,
+          text:
+            '⭐ <b>পার্সোনাল অ্যালার্ট চালু করতে কলেজের নাম বা বিষয় লিখুন:</b>\n\n' +
+            'উদাহরণ:\n' +
+            '• <code>/subscribe আজিজুল</code>\n' +
+            '• <code>/subscribe ফরম</code>\n' +
+            '• <code>/subscribe সব</code> (সব নোটিশ পেতে)',
+          message_thread_id: msg.message_thread_id,
+          reply_to_message_id: replyToMessageId,
+        });
+        return jsonResponse({ ok: true });
+      }
+
+      const keyword = rawArg.replace(/\s+/g, ' ').trim().slice(0, 60);
+      const displayName =
+        msg.chat?.title ||
+        update.message?.from?.first_name ||
+        update.message?.from?.username ||
+        chatKey;
+
+      if (existingIdx >= 0) {
+        const current = subscriptions[existingIdx];
+        const exists = current.keywords.some((k) => k.toLowerCase() === keyword.toLowerCase());
+        if (!exists) {
+          current.keywords = [...current.keywords, keyword].slice(0, 15);
+        }
+        current.name = displayName;
+      } else {
+        subscriptions.push({
+          chat_id: chatKey,
+          name: displayName,
+          keywords: [keyword],
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      await supabaseRest(env, 'settings?on_conflict=key', {
+        method: 'POST',
+        prefer: 'resolution=merge-duplicates',
+        body: [
+          {
+            key: 'telegram_subscriptions',
+            value: JSON.stringify(subscriptions),
+            updated_at: new Date().toISOString(),
+          },
+        ],
+      });
+
+      const activeKeywords =
+        subscriptions.find((s) => String(s.chat_id) === chatKey)?.keywords || [keyword];
+
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text:
+          `✅ "<b>${escapeTelegramHtml(keyword)}</b>" সাবস্ক্রিপশন চালু হয়েছে!\n\n` +
+          `এখন থেকে এই সম্পর্কিত নতুন নোটিশ প্রকাশিত হলেই আপনার ইনবক্সে অ্যালার্ট চলে যাবে।\n` +
+          `📌 সক্রিয় তালিকা: ${activeKeywords.map((k) => `<code>${escapeTelegramHtml(k)}</code>`).join(', ')}`,
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    // /unsubscribe
+    if (existingIdx < 0) {
+      await sendTelegramBotReply(botToken, {
+        chat_id: chatId,
+        text: 'ℹ️ আপনার কোনো সক্রিয় সাবস্ক্রিপশন পাওয়া যায়নি।',
+        message_thread_id: msg.message_thread_id,
+        reply_to_message_id: replyToMessageId,
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    const argLower = rawArg.toLowerCase();
+    let replyMsg = '';
+    if (!rawArg || argLower === 'all' || rawArg === 'সব') {
+      subscriptions.splice(existingIdx, 1);
+      replyMsg = '✅ আপনার সবগুলো পার্সোনাল নোটিশ সাবস্ক্রিপশন বন্ধ করা হয়েছে।';
+    } else {
+      const prevList = subscriptions[existingIdx].keywords || [];
+      const nextList = prevList.filter((k) => k.toLowerCase() !== argLower);
+      if (nextList.length === prevList.length) {
+        replyMsg = `ℹ️ "<b>${escapeTelegramHtml(rawArg)}</b>" আপনার সাবস্ক্রিপশন তালিকায় পাওয়া যায়নি। তালিকা দেখতে লিখুন <code>/subscriptions</code>`;
+      } else {
+        if (nextList.length === 0) {
+          subscriptions.splice(existingIdx, 1);
+        } else {
+          subscriptions[existingIdx].keywords = nextList;
+        }
+        replyMsg = `✅ "<b>${escapeTelegramHtml(rawArg)}</b>" সাবস্ক্রিপশন থেকে বাদ দেওয়া হয়েছে।`;
+      }
+    }
+
+    await supabaseRest(env, 'settings?on_conflict=key', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates',
+      body: [
+        {
+          key: 'telegram_subscriptions',
+          value: JSON.stringify(subscriptions),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    await sendTelegramBotReply(botToken, {
+      chat_id: chatId,
+      text: replyMsg,
       message_thread_id: msg.message_thread_id,
       reply_to_message_id: replyToMessageId,
     });
@@ -1941,6 +2338,9 @@ async function handleRegisterTelegramWebhook(request: Request, env: Env): Promis
           commands: [
             { command: 'latest', description: 'সর্বশেষ ৮টি নোটিশ দেখুন' },
             { command: 'notice', description: 'সর্বশেষ নোটিশ দেখুন বা খুঁজুন' },
+            { command: 'subscribe', description: 'কলেজ বা বিষয়ের পার্সোনাল অ্যালার্ট নিন' },
+            { command: 'subscriptions', description: 'চালু থাকা সাবস্ক্রিপশন দেখুন' },
+            { command: 'unsubscribe', description: 'সাবস্ক্রিপশন বন্ধ করুন' },
             { command: 'colleges', description: 'সক্রিয় কলেজগুলোর তালিকা দেখুন' },
             { command: 'help', description: 'বট কমান্ড সহায়িকা' },
           ],
@@ -2084,6 +2484,12 @@ export default {
         // ৬. টেলিগ্রাম টেস্ট মেসেজ পাঠানো
         if (pathname === '/api/admin/telegram-test') {
           if (request.method === 'POST') return handleTelegramTest(request, env);
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+
+        // ৬খ. এডমিন ম্যানুয়াল ব্রডকাস্ট প্যানেল (সব গ্রুপ/চ্যানেলে এক ক্লিকে ঘোষণা)
+        if (pathname === '/api/admin/broadcast') {
+          if (request.method === 'POST') return handleAdminBroadcast(request, env);
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 

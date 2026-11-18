@@ -12,8 +12,14 @@ import {
   BarChart3,
   Webhook,
   RefreshCw,
+  Megaphone,
 } from 'lucide-react';
-import { TelegramSettingsResponse, TelegramWebhookStatus } from '../types';
+import {
+  AdminBroadcastPayload,
+  AdminBroadcastResponse,
+  TelegramSettingsResponse,
+  TelegramWebhookStatus,
+} from '../types';
 
 interface TelegramTesterProps {
   onLoadSettings: () => Promise<TelegramSettingsResponse>;
@@ -23,6 +29,7 @@ interface TelegramTesterProps {
   }) => Promise<TelegramSettingsResponse>;
   onTestTelegram: (message?: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
   onSendDailyDigest: () => Promise<{ ok: boolean; message?: string; error?: string }>;
+  onSendBroadcast: (payload: AdminBroadcastPayload) => Promise<AdminBroadcastResponse>;
   onLoadWebhookStatus: () => Promise<TelegramWebhookStatus>;
   onRegisterWebhook: () => Promise<TelegramWebhookStatus>;
 }
@@ -32,6 +39,7 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
   onSaveSettings,
   onTestTelegram,
   onSendDailyDigest,
+  onSendBroadcast,
   onLoadWebhookStatus,
   onRegisterWebhook,
 }) => {
@@ -55,6 +63,15 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
   const [isLoadingWebhook, setIsLoadingWebhook] = useState(false);
   const [isRegisteringWebhook, setIsRegisteringWebhook] = useState(false);
   const [webhookMsg, setWebhookMsg] = useState<{ success: boolean; text: string } | null>(null);
+
+  const [broadcastMessage, setBroadcastMessage] = useState('');
+  const [broadcastImageUrl, setBroadcastImageUrl] = useState('');
+  const [broadcastTarget, setBroadcastTarget] = useState<'all' | 'default' | 'custom'>('all');
+  const [broadcastCustomChats, setBroadcastCustomChats] = useState('');
+  const [isBroadcasting, setIsBroadcasting] = useState(false);
+  const [broadcastResult, setBroadcastResult] = useState<{ success: boolean; text: string } | null>(
+    null
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -207,6 +224,42 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
     }
   };
 
+  const handleBroadcastSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!broadcastMessage.trim()) {
+      setBroadcastResult({ success: false, text: 'ব্রডকাস্ট বার্তা ফাঁকা রাখা যাবে না।' });
+      return;
+    }
+    setIsBroadcasting(true);
+    setBroadcastResult(null);
+    try {
+      const res = await onSendBroadcast({
+        message: broadcastMessage.trim(),
+        image_url: broadcastImageUrl.trim() || undefined,
+        target: broadcastTarget,
+        custom_chat_ids: broadcastTarget === 'custom' ? broadcastCustomChats.trim() : undefined,
+      });
+      if (res.ok) {
+        setBroadcastResult({
+          success: true,
+          text: res.message || 'ঘোষণা সফলভাবে সব চ্যানেলে ব্রডকাস্ট করা হয়েছে!',
+        });
+        setBroadcastMessage('');
+        setBroadcastImageUrl('');
+      } else {
+        setBroadcastResult({
+          success: false,
+          text: res.error || 'ব্রডকাস্ট পাঠাতে ব্যর্থ হয়েছে।',
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'ব্রডকাস্ট পাঠাতে সমস্যা হয়েছে।';
+      setBroadcastResult({ success: false, text: msg });
+    } finally {
+      setIsBroadcasting(false);
+    }
+  };
+
   const anyBusy = isSaving || isTesting || isSendingDigest;
 
   return (
@@ -274,14 +327,14 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
             {/* Chat ID Input */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                ডিফল্ট Telegram Chat ID *
+                ডিফল্ট Telegram Chat ID * (কমা দিয়ে একাধিক দেওয়া যাবে)
               </label>
               <input
                 type="text"
                 required
                 value={chatId}
                 onChange={(e) => setChatId(e.target.value)}
-                placeholder="e.g. 1961224877 বা -100..."
+                placeholder="যেমন: -1001234567890, -1009876543210"
                 className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-sky-500 focus:bg-white"
               />
             </div>
@@ -491,6 +544,13 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
                 <code className="font-mono text-slate-900 font-semibold">/notice আজিজুল</code> — কলেজ বা বিষয় দিয়ে খোঁজা
               </li>
               <li>
+                <code className="font-mono text-slate-900 font-semibold">/subscribe আজিজুল</code> — পার্সোনাল নোটিশ অ্যালার্ট চালু
+              </li>
+              <li>
+                <code className="font-mono text-slate-900 font-semibold">/subscriptions</code> /{' '}
+                <code className="font-mono text-slate-900 font-semibold">/unsubscribe</code> — সাবস্ক্রিপশন পরিচালনা
+              </li>
+              <li>
                 <code className="font-mono text-slate-900 font-semibold">/colleges</code> — সক্রিয় কলেজের তালিকা
               </li>
             </ul>
@@ -499,11 +559,125 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
             <p className="font-bold text-slate-800">টেলিগ্রাম গ্রুপে ব্যবহারের নিয়ম</p>
             <p className="text-slate-600 leading-relaxed">
-              বটটিকে যেকোনো টেলিগ্রাম গ্রুপ বা সুপারগ্রুপে যোগ করে <strong>Admin</strong> বানিয়ে দিন। এরপর গ্রুপের Chat ID (যেমন <code className="font-mono">-100...</code>) উপরে বা নির্দিষ্ট কলেজের এডিটে বসিয়ে দিলে নোটিশও যাবে এবং গ্রুপের সদস্যরা <code className="font-mono">/latest</code> বা <code className="font-mono">/notice</code> লিখে সাথে সাথে উত্তর পাবে।
+              বটটিকে যেকোনো টেলিগ্রাম গ্রুপ বা সুপারগ্রুপে যোগ করে <strong>Admin</strong> বানিয়ে দিন। এরপর গ্রুপের Chat ID (যেমন <code className="font-mono">-100...</code>) উপরে বা নির্দিষ্ট কলেজের এডিটে কমা (,) দিয়ে বসিয়ে দিলে একসাথে একাধিক গ্রুপে নোটিশ যাবে এবং গ্রুপের সদস্যরা <code className="font-mono">/latest</code>, <code className="font-mono">/notice</code> বা ইনবক্সে <code className="font-mono">/subscribe</code> ব্যবহার করতে পারবে।
             </p>
           </div>
         </div>
       </div>
+    </div>
+
+    {/* Admin Manual Broadcast Panel */}
+    <div className="bg-white border border-slate-200 rounded-xl sm:rounded-2xl p-3.5 sm:p-6 shadow-xs">
+      <div className="flex items-center space-x-3 pb-3.5 border-b border-slate-100">
+        <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+          <Megaphone className="w-5 h-5" />
+        </div>
+        <div>
+          <h3 className="text-sm sm:text-base font-bold text-slate-900">
+            এডমিন ম্যানুয়াল ব্রডকাস্ট প্যানেল
+          </h3>
+          <p className="text-[11px] sm:text-xs text-slate-500">
+            নিজের লেখা যেকোনো জরুরি ঘোষণা ও ছবি এক ক্লিকে যুক্ত সব টেলিগ্রাম চ্যানেল ও গ্রুপে পাঠান
+          </p>
+        </div>
+      </div>
+
+      <form onSubmit={handleBroadcastSubmit} className="mt-4 space-y-4">
+        <div className="flex flex-wrap gap-2">
+          {[
+            { id: 'all' as const, label: 'সব যুক্ত গ্রুপ ও চ্যানেল' },
+            { id: 'default' as const, label: 'শুধু ডিফল্ট চ্যাট' },
+            { id: 'custom' as const, label: 'কাস্টম Chat ID' },
+          ].map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => setBroadcastTarget(opt.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                broadcastTarget === opt.id
+                  ? 'bg-amber-600 text-white border-amber-600'
+                  : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {broadcastTarget === 'custom' && (
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              কাস্টম Chat ID সমূহ (কমা দিয়ে আলাদা করুন) *
+            </label>
+            <input
+              type="text"
+              value={broadcastCustomChats}
+              onChange={(e) => setBroadcastCustomChats(e.target.value)}
+              placeholder="-1001234567890, -1009876543210"
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-amber-500 focus:bg-white"
+            />
+          </div>
+        )}
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-700 mb-1">
+            ঘোষণার টেক্সট *
+          </label>
+          <textarea
+            rows={3}
+            required
+            value={broadcastMessage}
+            onChange={(e) => setBroadcastMessage(e.target.value)}
+            placeholder="যেমন: প্রিয় শিক্ষার্থীবৃন্দ, আগামীকাল থেকে ফরম পূরণের নতুন সময়সূচি কার্যকর হবে..."
+            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 focus:outline-none focus:border-amber-500 focus:bg-white"
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-700 mb-1">
+            ছবির লিংক / URL (ঐচ্ছিক)
+          </label>
+          <input
+            type="url"
+            value={broadcastImageUrl}
+            onChange={(e) => setBroadcastImageUrl(e.target.value)}
+            placeholder="https://example.com/notice-banner.jpg"
+            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-amber-500 focus:bg-white"
+          />
+        </div>
+
+        {broadcastResult && (
+          <div
+            className={`p-3 rounded-lg border text-xs flex items-start space-x-2 ${
+              broadcastResult.success
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-rose-50 border-rose-200 text-rose-800'
+            }`}
+          >
+            {broadcastResult.success ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            )}
+            <span>{broadcastResult.text}</span>
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <button
+            type="submit"
+            disabled={isBroadcasting || !hasSavedToken || !broadcastMessage.trim()}
+            className="inline-flex items-center space-x-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold shadow-xs transition-colors disabled:opacity-50 cursor-pointer"
+          >
+            {isBroadcasting ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Megaphone className="w-3.5 h-3.5" />
+            )}
+            <span>{isBroadcasting ? 'পাঠানো হচ্ছে...' : 'সব চ্যানেলে ব্রডকাস্ট করুন'}</span>
+          </button>
+        </div>
+      </form>
     </div>
     </div>
   );

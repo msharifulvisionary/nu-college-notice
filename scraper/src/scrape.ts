@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 import * as cheerio from 'cheerio';
 import { createClient } from '@supabase/supabase-js';
 
@@ -13,6 +14,8 @@ interface SelectorConfig {
   link_selector?: string;
   link?: string;
   note?: string;
+  proxy_url?: string;
+  custom_headers?: Record<string, string>;
 }
 
 interface CollegeRow {
@@ -65,11 +68,33 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   },
 });
 
+interface TelegramSubscription {
+  chat_id: string;
+  name?: string;
+  keywords: string[];
+  created_at?: string;
+}
+
+interface UpcomingDeadlineEntry {
+  notice_link: string;
+  college_id: string;
+  college_name: string;
+  title: string;
+  link: string;
+  deadline_date: string; // YYYY-MM-DD (Asia/Dhaka)
+  reminded_days: number[];
+  chat_id?: string | null;
+  thread_id?: number | null;
+}
+
 interface TelegramRuntimeConfig {
   botToken: string;
   chatId: string;
   lastDailyDigestDate: string;
+  lastLogCleanupDate: string;
   autoScanEnabled: boolean;
+  subscriptions: TelegramSubscription[];
+  upcomingDeadlines: UpcomingDeadlineEntry[];
 }
 
 interface TelegramTarget {
@@ -91,7 +116,10 @@ async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
   let dbToken = '';
   let dbChatId = '';
   let lastDailyDigestDate = '';
+  let lastLogCleanupDate = '';
   let autoScanEnabled = true;
+  let subscriptions: TelegramSubscription[] = [];
+  let upcomingDeadlines: UpcomingDeadlineEntry[] = [];
 
   try {
     const { data, error } = await supabase
@@ -101,7 +129,10 @@ async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
         'telegram_bot_token',
         'telegram_chat_id',
         'last_daily_digest_date',
+        'last_log_cleanup_date',
         'auto_scan_enabled',
+        'telegram_subscriptions',
+        'upcoming_deadlines',
       ]);
 
     if (error) {
@@ -117,8 +148,31 @@ async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
         if (row.key === 'last_daily_digest_date' && typeof row.value === 'string') {
           lastDailyDigestDate = row.value.trim();
         }
+        if (row.key === 'last_log_cleanup_date' && typeof row.value === 'string') {
+          lastLogCleanupDate = row.value.trim();
+        }
         if (row.key === 'auto_scan_enabled' && typeof row.value === 'string') {
           autoScanEnabled = row.value.trim().toLowerCase() !== 'false';
+        }
+        if (row.key === 'telegram_subscriptions' && typeof row.value === 'string' && row.value.trim()) {
+          try {
+            const parsed = JSON.parse(row.value);
+            if (Array.isArray(parsed)) {
+              subscriptions = parsed;
+            }
+          } catch {
+            // ignore malformed JSON
+          }
+        }
+        if (row.key === 'upcoming_deadlines' && typeof row.value === 'string' && row.value.trim()) {
+          try {
+            const parsed = JSON.parse(row.value);
+            if (Array.isArray(parsed)) {
+              upcomingDeadlines = parsed;
+            }
+          } catch {
+            // ignore malformed JSON
+          }
         }
       }
     }
@@ -131,7 +185,10 @@ async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
     botToken: dbToken || ENV_TELEGRAM_BOT_TOKEN,
     chatId: dbChatId || ENV_TELEGRAM_CHAT_ID,
     lastDailyDigestDate,
+    lastLogCleanupDate,
     autoScanEnabled,
+    subscriptions,
+    upcomingDeadlines,
   };
 }
 
@@ -501,49 +558,153 @@ function looksLikeSpaHtml(html: string): boolean {
   return hasSpaMount || (hasModuleScript && visibleTextLength < 300);
 }
 
+const BROWSER_USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36',
+];
+
+function buildProxyFetchUrl(proxyTemplate: string, targetUrl: string): string {
+  const trimmed = proxyTemplate.trim();
+  if (!trimmed) return targetUrl;
+  if (trimmed.includes('{url}')) {
+    return trimmed.replace(/\{url\}/g, encodeURIComponent(targetUrl));
+  }
+  if (trimmed.endsWith('=') || trimmed.endsWith('?')) {
+    return `${trimmed}${encodeURIComponent(targetUrl)}`;
+  }
+  return `${trimmed.replace(/\/+$/, '')}/${targetUrl}`;
+}
+
 async function fetchHtmlWithDetails(
-  targetUrl: string
+  targetUrl: string,
+  selectorConfig: SelectorConfig = {}
 ): Promise<{ ok: true; status: number; html: string; finalUrl: string } | { ok: false; status: number; statusText: string }> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000);
+  const customHeaders =
+    selectorConfig.custom_headers && typeof selectorConfig.custom_headers === 'object'
+      ? selectorConfig.custom_headers
+      : {};
+  const proxyTemplate = (
+    selectorConfig.proxy_url ||
+    process.env.SCRAPER_PROXY_URL ||
+    ''
+  ).trim();
 
+  let originHeader = '';
   try {
-    const response = await fetch(targetUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'bn-BD,bn;q=0.9,en-US;q=0.8,en;q=0.7',
-      },
-      signal: controller.signal,
-    });
+    originHeader = new URL(targetUrl).origin + '/';
+  } catch {
+    originHeader = '';
+  }
 
-    if (!response.ok) {
+  let lastStatus = 0;
+  let lastStatusText = 'NetworkError';
+  let lastError: unknown = null;
+
+  // ৩ বার রিট্রাই + ভিন্ন User-Agent ও Referer রোটেশন (সরকারি সাইটের ব্লক/টাইমআউট এড়াতে)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const ua = BROWSER_USER_AGENTS[(attempt + Math.floor(Math.random() * BROWSER_USER_AGENTS.length)) % BROWSER_USER_AGENTS.length];
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), attempt === 0 ? 10000 : 14000);
+
+    try {
+      const response = await fetch(targetUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': ua,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept-Language': 'bn-BD,bn;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Cache-Control': 'no-cache',
+          ...(originHeader ? { Referer: originHeader } : {}),
+          ...customHeaders,
+        },
+        signal: controller.signal,
+      });
+
+      if (response.ok) {
+        const html = await response.text();
+        return {
+          ok: true,
+          status: response.status,
+          html,
+          finalUrl: response.url || targetUrl,
+        };
+      }
+
+      lastStatus = response.status;
+      lastStatusText = response.statusText;
+
       const bodyPreview = (await response.text().catch(() => ''))
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, 200);
-      console.error(
-        `[Fetch HTTP Error] url=${targetUrl} finalUrl=${response.url} status=${response.status} statusText="${response.statusText}" server="${response.headers.get('server') || 'unknown'}" cfRay="${response.headers.get('cf-ray') || 'none'}" bodyPreview="${bodyPreview}"`
+      console.warn(
+        `[Fetch Attempt ${attempt + 1}/3] url=${targetUrl} status=${response.status} statusText="${response.statusText}" bodyPreview="${bodyPreview}"`
       );
-      return {
-        ok: false,
-        status: response.status,
-        statusText: response.statusText,
-      };
-    }
 
-    const html = await response.text();
-    return {
-      ok: true,
-      status: response.status,
-      html,
-      finalUrl: response.url || targetUrl,
-    };
-  } finally {
-    clearTimeout(timeoutId);
+      // 404 হলে সাথে সাথে SPA fallback-এ যেতে দেবো (রিট্রাই নয়)
+      if (response.status === 404) {
+        return { ok: false, status: 404, statusText: response.statusText };
+      }
+
+      // 403 / 429 / 5xx হলে অন্য User-Agent দিয়ে আবার চেষ্টা করবে
+      if (response.status === 403 || response.status === 429 || response.status >= 500) {
+        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+        continue;
+      }
+
+      return { ok: false, status: response.status, statusText: response.statusText };
+    } catch (err: unknown) {
+      lastError = err;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Fetch Attempt ${attempt + 1}/3 Failed] url=${targetUrl} error="${errMsg}"`);
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
+
+  // প্রক্সি URL দেওয়া থাকলে এবং সরাসরি ব্লক/ফেইল হলে প্রক্সি ফলব্যাক চেষ্টা করা হবে
+  if (proxyTemplate) {
+    const proxiedUrl = buildProxyFetchUrl(proxyTemplate, targetUrl);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    try {
+      console.log(`[Proxy Fallback] Trying proxy for ${targetUrl}...`);
+      const proxyRes = await fetch(proxiedUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': BROWSER_USER_AGENTS[0],
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          ...customHeaders,
+        },
+        signal: controller.signal,
+      });
+      if (proxyRes.ok) {
+        const html = await proxyRes.text();
+        return {
+          ok: true,
+          status: proxyRes.status,
+          html,
+          finalUrl: targetUrl,
+        };
+      }
+    } catch (proxyErr) {
+      console.warn(`[Proxy Fallback Failed] ${proxyErr instanceof Error ? proxyErr.message : String(proxyErr)}`);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  if (lastStatus > 0) {
+    return { ok: false, status: lastStatus, statusText: lastStatusText };
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Failed to fetch college page');
 }
 
 async function renderSpaWithPlaywright(
@@ -653,7 +814,7 @@ async function scrapeCollegeNotices(
   selectorConfig: SelectorConfig = {}
 ): Promise<{ notices: ScrapedNotice[]; totalMatched: number }> {
   try {
-    const fetchResult = await fetchHtmlWithDetails(noticeUrl);
+    const fetchResult = await fetchHtmlWithDetails(noticeUrl, selectorConfig);
 
     if (!fetchResult.ok) {
       // যদি নির্দিষ্ট কোনো পাথ (যেমন /notices) 404 দেয়, কিন্তু মূল ডোমেইন (/) একটি সক্রিয় SPA হয়,
@@ -662,7 +823,7 @@ async function scrapeCollegeNotices(
         const parsed = new URL(noticeUrl);
         if (parsed.pathname && parsed.pathname !== '/') {
           const originUrl = `${parsed.origin}/`;
-          const originRes = await fetchHtmlWithDetails(originUrl).catch(() => null);
+          const originRes = await fetchHtmlWithDetails(originUrl, selectorConfig).catch(() => null);
           if (originRes && originRes.ok && looksLikeSpaHtml(originRes.html)) {
             console.log(
               `[SPA Fallback] "${noticeUrl}" returned 404, but "${originUrl}" is an active SPA. Rendering via Playwright...`
@@ -670,6 +831,28 @@ async function scrapeCollegeNotices(
             const rendered = await renderSpaWithPlaywright(noticeUrl, { spaOriginUrl: originUrl });
             return extractNoticesFromHtml(rendered.html, rendered.finalUrl, selectorConfig);
           }
+        }
+      }
+
+      // ৪0৩ বা ৪২৯ বা ৫0৩ WAF ব্লক করলে আসল হেডলেস ক্রোম দিয়ে এক বার চেষ্টা করা হবে
+      if (fetchResult.status === 403 || fetchResult.status === 429 || fetchResult.status === 503) {
+        console.log(
+          `[Browser Fallback] Direct fetch got HTTP ${fetchResult.status} for ${noticeUrl}. Trying Playwright...`
+        );
+        try {
+          const rendered = await renderSpaWithPlaywright(noticeUrl);
+          const parsedBrowser = extractNoticesFromHtml(
+            rendered.html,
+            rendered.finalUrl,
+            selectorConfig
+          );
+          if (parsedBrowser.notices.length > 0) {
+            return parsedBrowser;
+          }
+        } catch (pwErr) {
+          console.warn(
+            `[Browser Fallback Failed] ${pwErr instanceof Error ? pwErr.message : String(pwErr)}`
+          );
         }
       }
 
@@ -729,26 +912,99 @@ async function scrapeCollegeNotices(
   }
 }
 
-function formatTelegramMessage(collegeName: string, notice: ScrapedNotice): string {
-  const dateLine = notice.date ? `\n📅 তারিখ: ${notice.date}` : '';
-  return `🔔 নতুন নোটিশ — ${collegeName}${dateLine}\n\n📌 ${notice.title}\n🔗 ${notice.link}`;
+function classifyNoticeAlertTags(title: string): { isUrgent: boolean; tags: string[] } {
+  const lower = title.toLowerCase();
+  const tags: string[] = [];
+
+  if (lower.includes('ফরম') || lower.includes('ফর্ম') || lower.includes('form')) {
+    tags.push('#ফরম_পূরণ');
+  }
+  if (lower.includes('রুটিন') || lower.includes('সময়সূচী') || lower.includes('routine') || lower.includes('schedule')) {
+    tags.push('#পরীক্ষার_রুটিন');
+  }
+  if (lower.includes('ফলাফল') || lower.includes('ফল') || lower.includes('result')) {
+    tags.push('#ফলাফল');
+  }
+  if (lower.includes('ভর্তি') || lower.includes('admission')) {
+    tags.push('#ভর্তি');
+  }
+  if (lower.includes('স্থগিত') || lower.includes('বাতিল') || lower.includes('postponed')) {
+    tags.push('#স্থগিত');
+  }
+  if ((lower.includes('পরীক্ষা') || lower.includes('exam')) && !tags.includes('#পরীক্ষার_রুটিন')) {
+    tags.push('#পরীক্ষা');
+  }
+
+  const isUrgent =
+    lower.includes('জরুরি') ||
+    lower.includes('অতি জরুরি') ||
+    lower.includes('urgent') ||
+    lower.includes('স্থগিত') ||
+    lower.includes('বাতিল') ||
+    lower.includes('সংশোধিত') ||
+    lower.includes('সময় বৃদ্ধি') ||
+    lower.includes('বর্ধিত') ||
+    tags.includes('#ফরম_পূরণ') ||
+    tags.includes('#পরীক্ষার_রুটিন') ||
+    tags.includes('#ফলাফল');
+
+  return { isUrgent, tags: tags.slice(0, 3) };
 }
 
-function resolveCollegeTelegramTarget(
+function formatTelegramMessage(
+  collegeName: string,
+  notice: ScrapedNotice,
+  deadlineIso?: string | null
+): string {
+  const { isUrgent, tags } = classifyNoticeAlertTags(notice.title);
+  const tagHeaderParts: string[] = [];
+  if (isUrgent) tagHeaderParts.push('🚨 জরুরি');
+  if (tags.length > 0) tagHeaderParts.push(tags.join(' '));
+  const tagLine = tagHeaderParts.length > 0 ? `${tagHeaderParts.join(' · ')}\n` : '';
+
+  const dateLine = notice.date ? `\n📅 তারিখ: ${notice.date}` : '';
+  const deadlineLine = deadlineIso ? `\n⏳ শেষ তারিখ: ${deadlineIso}` : '';
+
+  return `${tagLine}🔔 নতুন নোটিশ — ${collegeName}${dateLine}${deadlineLine}\n\n📌 ${notice.title}\n🔗 ${notice.link}`;
+}
+
+function parseChatIdList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  const seen = new Set<string>();
+  const list: string[] = [];
+  for (const part of raw.split(/[,\n]+/)) {
+    const clean = part.trim().replace(/^\./, '');
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      list.push(clean);
+    }
+  }
+  return list;
+}
+
+function resolveCollegeTelegramTargets(
   college: CollegeRow,
   globalConfig: TelegramRuntimeConfig
-): TelegramTarget {
-  const customChat = (college.telegram_chat_id || '').trim();
+): TelegramTarget[] {
+  const customChats = parseChatIdList(college.telegram_chat_id);
+  const globalChats = parseChatIdList(globalConfig.chatId);
   const threadId =
     typeof college.telegram_thread_id === 'number' && college.telegram_thread_id > 0
       ? college.telegram_thread_id
       : undefined;
 
-  return {
+  if (customChats.length > 0) {
+    return customChats.map((chatId, idx) => ({
+      botToken: globalConfig.botToken,
+      chatId,
+      threadId: idx === 0 ? threadId : undefined,
+    }));
+  }
+
+  return globalChats.map((chatId) => ({
     botToken: globalConfig.botToken,
-    chatId: customChat || globalConfig.chatId,
-    threadId,
-  };
+    chatId,
+  }));
 }
 
 async function sendTelegramTextMessage(
@@ -1004,19 +1260,100 @@ async function tryDownloadDirectAttachment(
   }
 }
 
-async function resolveNoticeAttachment(
+function extractTextFromPdfBuffer(buffer: ArrayBuffer): string {
+  try {
+    const raw = Buffer.from(buffer);
+    const latin = raw.toString('latin1');
+    const chunks: string[] = [];
+
+    // FlateDecode স্ট্রিম থেকে টেক্সট ডিকম্প্রেস করার হালকা বিশুদ্ধ Node প্রচেষ্টা
+    const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+    let match: RegExpExecArray | null;
+    let streamCount = 0;
+    while ((match = streamRegex.exec(latin)) !== null && streamCount < 12) {
+      streamCount += 1;
+      const bodyStr = match[1];
+      if (!bodyStr || bodyStr.length > 1024 * 1024) continue;
+      const sliceBuf = Buffer.from(bodyStr, 'latin1');
+      let decoded = '';
+      try {
+        decoded = zlib.inflateSync(sliceBuf).toString('utf8');
+      } catch {
+        decoded = bodyStr;
+      }
+      const textTokens = decoded.match(/\(([^()\\]{2,180})\)/g);
+      if (textTokens) {
+        chunks.push(
+          textTokens.map((t) => t.slice(1, -1)).join(' ')
+        );
+      }
+    }
+
+    if (chunks.length === 0) {
+      const plainTokens = latin.match(/\(([^()\\]{3,160})\)/g);
+      if (plainTokens) {
+        chunks.push(plainTokens.slice(0, 200).map((t) => t.slice(1, -1)).join(' '));
+      }
+    }
+
+    return chunks.join(' ').replace(/\s+/g, ' ').trim();
+  } catch {
+    return '';
+  }
+}
+
+function toAsciiDigits(text: string): string {
+  return text.replace(/[০-৯]/g, (d) => BENGALI_DIGITS_MAP[d] || d);
+}
+
+function extractDeadlineIsoFromText(text: string): string | null {
+  if (!text) return null;
+  const normalized = toAsciiDigits(text).replace(/\s+/g, ' ');
+
+  const deadlineCueRegex =
+    /(শেষ\s*তারিখ|শেষ\s*সময়|সর্বশেষ\s*তারিখ|শেষ\s*দিন|আবেদনের\s*শেষ|জমা\s*দেওয়ার\s*শেষ|পর্যন্ত|last\s*date|deadline)[^.\n]{0,80}/gi;
+
+  const todayDhaka = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' }).format(
+    new Date()
+  );
+  const todayMs = Date.parse(`${todayDhaka}T00:00:00+06:00`);
+  const maxFutureMs = todayMs + 180 * 24 * 60 * 60 * 1000;
+
+  let match: RegExpExecArray | null;
+  while ((match = deadlineCueRegex.exec(normalized)) !== null) {
+    const snippet = match[0];
+    const parsedIso = parseNoticePublishedAt(snippet, 0);
+    if (!parsedIso) continue;
+    const ms = Date.parse(parsedIso);
+    if (Number.isNaN(ms)) continue;
+    // আজ বা আগামী ১৮০ দিনের মধ্যে থাকা যৌক্তিক ডেডলাইন নেওয়া হবে
+    if (ms >= todayMs - 24 * 60 * 60 * 1000 && ms <= maxFutureMs) {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' }).format(new Date(ms));
+    }
+  }
+
+  return null;
+}
+
+async function resolveNoticeAttachmentAndText(
   noticeLink: string,
   title: string
-): Promise<DownloadedAttachment | null> {
+): Promise<{ attachment: DownloadedAttachment | null; extractedText: string }> {
   const normalizedUrl = normalizeAttachmentUrl(noticeLink);
+  let extractedText = '';
 
   // ১. সরাসরি PDF বা Image লিংক হলে প্রথমে সেটি ডাউনলোডের চেষ্টা
   if (looksLikePdfUrl(normalizedUrl) || looksLikeImageUrl(normalizedUrl)) {
     const directMedia = await tryDownloadDirectAttachment(normalizedUrl, title);
-    if (directMedia) return directMedia;
+    if (directMedia) {
+      if (directMedia.kind === 'pdf') {
+        extractedText = extractTextFromPdfBuffer(directMedia.buffer);
+      }
+      return { attachment: directMedia, extractedText };
+    }
   }
 
-  // ২. ডিটেইল পেইজ HTML থেকে সংযুক্ত PDF বা ছবি খুঁজে বের করা
+  // ২. ডিটেইল পেইজ HTML থেকে সংযুক্ত PDF বা ছবি ও টেক্সট খুঁজে বের করা
   try {
     const pageFetch = await fetchHtmlWithDetails(normalizedUrl).catch(() => null);
     let detailHtml = '';
@@ -1050,19 +1387,29 @@ async function resolveNoticeAttachment(
       }
     }
 
-    if (!detailHtml) return null;
+    if (!detailHtml) return { attachment: null, extractedText };
+
+    const $detail = cheerio.load(detailHtml);
+    $detail('script, style, nav, header, footer').remove();
+    extractedText = $detail('body').text().replace(/\s+/g, ' ').trim().slice(0, 6000);
 
     const candidates = extractAttachmentsFromDetailHtml(detailHtml, detailFinalUrl);
     for (const candidateUrl of candidates.slice(0, 4)) {
       const media = await tryDownloadDirectAttachment(candidateUrl, title);
-      if (media) return media;
+      if (media) {
+        if (media.kind === 'pdf') {
+          const pdfTxt = extractTextFromPdfBuffer(media.buffer);
+          if (pdfTxt) extractedText = `${extractedText} ${pdfTxt}`.trim();
+        }
+        return { attachment: media, extractedText };
+      }
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[Attachment] Detail inspection skipped (${msg}): ${noticeLink}`);
   }
 
-  return null;
+  return { attachment: null, extractedText };
 }
 
 async function sendTelegramMultipartMedia(
@@ -1100,13 +1447,11 @@ async function sendTelegramMultipartMedia(
   }
 }
 
-async function sendNoticeWithAttachmentSupport(
-  collegeName: string,
-  notice: ScrapedNotice,
+async function deliverPreparedNoticeToTarget(
+  fullText: string,
+  attachment: DownloadedAttachment | null,
   target: TelegramTarget
 ): Promise<{ ok: boolean; deliveryType: 'pdf' | 'photo' | 'text'; error?: string }> {
-  const fullText = formatTelegramMessage(collegeName, notice);
-
   if (!target.botToken || !target.chatId) {
     return {
       ok: false,
@@ -1115,7 +1460,6 @@ async function sendNoticeWithAttachmentSupport(
     };
   }
 
-  const attachment = await resolveNoticeAttachment(notice.link, notice.title);
   if (attachment) {
     const caption = fullText.length > 1000 ? `${fullText.slice(0, 997)}...` : fullText;
 
@@ -1130,9 +1474,6 @@ async function sendNoticeWithAttachmentSupport(
       if (photoRes.ok) {
         return { ok: true, deliveryType: 'photo' };
       }
-      console.warn(
-        `[Telegram] sendPhoto failed (${photoRes.error}); retrying image as sendDocument.`
-      );
       const docFallback = await sendTelegramMultipartMedia(
         'sendDocument',
         'document',
@@ -1154,7 +1495,6 @@ async function sendNoticeWithAttachmentSupport(
       if (docRes.ok) {
         return { ok: true, deliveryType: 'pdf' };
       }
-      console.warn(`[Telegram] sendDocument failed (${docRes.error}); falling back to sendMessage.`);
     }
   }
 
@@ -1163,6 +1503,53 @@ async function sendNoticeWithAttachmentSupport(
     ok: fallbackResult.ok,
     deliveryType: 'text',
     error: fallbackResult.error,
+  };
+}
+
+async function sendNoticeWithAttachmentSupport(
+  collegeName: string,
+  notice: ScrapedNotice,
+  targets: TelegramTarget[]
+): Promise<{
+  ok: boolean;
+  deliveryType: 'pdf' | 'photo' | 'text';
+  deadlineIso: string | null;
+  attachment: DownloadedAttachment | null;
+  fullText: string;
+  sentChatIds: string[];
+  error?: string;
+}> {
+  const { attachment, extractedText } = await resolveNoticeAttachmentAndText(
+    notice.link,
+    notice.title
+  );
+  const deadlineIso = extractDeadlineIsoFromText(`${notice.title} ${extractedText}`);
+  const fullText = formatTelegramMessage(collegeName, notice, deadlineIso);
+
+  let anyOk = false;
+  let lastDeliveryType: 'pdf' | 'photo' | 'text' = 'text';
+  let lastError: string | undefined;
+  const sentChatIds: string[] = [];
+
+  for (const target of targets) {
+    const res = await deliverPreparedNoticeToTarget(fullText, attachment, target);
+    if (res.ok) {
+      anyOk = true;
+      lastDeliveryType = res.deliveryType;
+      sentChatIds.push(target.chatId.replace(/^\./, ''));
+    } else {
+      lastError = res.error;
+    }
+  }
+
+  return {
+    ok: anyOk,
+    deliveryType: lastDeliveryType,
+    deadlineIso,
+    attachment,
+    fullText,
+    sentChatIds,
+    error: lastError,
   };
 }
 
@@ -1205,14 +1592,24 @@ async function updateCollegeHealth(
       `কারণ: ${outcome.errorMessage}\n` +
       `লিংক: ${college.notice_url}`;
 
-    const alertRes = await sendTelegramTextMessage(alertText, {
-      botToken: globalConfig.botToken,
-      chatId: globalConfig.chatId,
-    });
-    if (alertRes.ok) {
+    const adminChats = parseChatIdList(globalConfig.chatId);
+    let anySent = false;
+    let lastErr = '';
+    for (const adminChatId of adminChats) {
+      const alertRes = await sendTelegramTextMessage(alertText, {
+        botToken: globalConfig.botToken,
+        chatId: adminChatId,
+      });
+      if (alertRes.ok) {
+        anySent = true;
+      } else if (alertRes.error) {
+        lastErr = alertRes.error;
+      }
+    }
+    if (anySent) {
       console.log(`[Health Alert] Sent failure alert for ${college.name} (failures=${nextFailures})`);
-    } else {
-      console.error(`[Health Alert] Failed to send alert for ${college.name}: ${alertRes.error}`);
+    } else if (adminChats.length > 0) {
+      console.error(`[Health Alert] Failed to send alert for ${college.name}: ${lastErr}`);
     }
   }
 }
@@ -1364,9 +1761,10 @@ async function processCollege(
   }
 
   console.log(`[Dispatch] ${dispatchQueue.length} pending notices in Telegram queue for ${college.name}`);
-  const target = resolveCollegeTelegramTarget(college, globalConfig);
+  const targets = resolveCollegeTelegramTargets(college, globalConfig);
 
   let sentCount = 0;
+  let deadlinesChanged = false;
   for (const row of dispatchQueue) {
     const sendRes = await sendNoticeWithAttachmentSupport(
       college.name,
@@ -1375,7 +1773,7 @@ async function processCollege(
         link: row.link,
         date: row.date || undefined,
       },
-      target
+      targets
     );
 
     if (sendRes.ok) {
@@ -1384,10 +1782,70 @@ async function processCollege(
         .update({ notified: true, notified_at: new Date().toISOString() })
         .eq('id', row.id);
       sentCount += 1;
-      console.log(`[Telegram] Sent (${sendRes.deliveryType.toUpperCase()}): ${row.title}`);
+      console.log(`[Telegram] Sent (${sendRes.deliveryType.toUpperCase()}) to ${sendRes.sentChatIds.length} chat(s): ${row.title}`);
+
+      // যদি শেষ তারিখ (Deadline) পাওয়া যায়, তবে রিমাইন্ডার লিস্টে যুক্ত করা হবে
+      if (sendRes.deadlineIso) {
+        const alreadyTracked = globalConfig.upcomingDeadlines.some(
+          (d) => d.notice_link === row.link
+        );
+        if (!alreadyTracked) {
+          globalConfig.upcomingDeadlines.push({
+            notice_link: row.link,
+            college_id: college.id,
+            college_name: college.name,
+            title: row.title,
+            link: row.link,
+            deadline_date: sendRes.deadlineIso,
+            reminded_days: [],
+            chat_id: college.telegram_chat_id || null,
+            thread_id: college.telegram_thread_id || null,
+          });
+          deadlinesChanged = true;
+        }
+      }
+
+      // পার্সোনাল সাবস্ক্রিপশন (/subscribe) ম্যাচিং শিক্ষার্থীদের ইনবক্সে পাঠানো হবে
+      if (globalConfig.subscriptions.length > 0 && globalConfig.botToken) {
+        const sentSet = new Set(sendRes.sentChatIds);
+        const collegeLower = college.name.toLowerCase();
+        const titleLower = row.title.toLowerCase();
+
+        for (const sub of globalConfig.subscriptions) {
+          const cleanSubChat = String(sub.chat_id || '').trim();
+          if (!cleanSubChat || sentSet.has(cleanSubChat)) continue;
+          const kws = Array.isArray(sub.keywords) ? sub.keywords : [];
+          const matchedKw = kws.find((kw) => {
+            const q = String(kw || '').trim().toLowerCase();
+            if (!q) return false;
+            return q === 'সব' || q === 'all' || collegeLower.includes(q) || titleLower.includes(q);
+          });
+          if (!matchedKw) continue;
+
+          const subText = `⭐ সাবস্ক্রিপশন অ্যালার্ট ("${matchedKw}")\n\n${sendRes.fullText}`;
+          const subRes = await deliverPreparedNoticeToTarget(subText, sendRes.attachment, {
+            botToken: globalConfig.botToken,
+            chatId: cleanSubChat,
+          });
+          if (subRes.ok) {
+            sentSet.add(cleanSubChat);
+          }
+        }
+      }
     } else {
       console.error(`[Telegram] Failed to send "${row.title}" (will retry next run): ${sendRes.error}`);
     }
+  }
+
+  if (deadlinesChanged) {
+    await supabase.from('settings').upsert(
+      {
+        key: 'upcoming_deadlines',
+        value: JSON.stringify(globalConfig.upcomingDeadlines.slice(-100)),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
   }
 
   console.log(`[Telegram] Sent ${sentCount} telegram messages for ${college.name}`);
@@ -1470,12 +1928,22 @@ async function maybeSendDailyDigest(globalConfig: TelegramRuntimeConfig): Promis
     }
   }
 
-  const sendRes = await sendTelegramTextMessage(lines.join('\n'), {
-    botToken: globalConfig.botToken,
-    chatId: globalConfig.chatId,
-  });
+  const digestTargets = parseChatIdList(globalConfig.chatId);
+  let digestSentAny = false;
+  let lastDigestErr = '';
+  for (const chatId of digestTargets) {
+    const sendRes = await sendTelegramTextMessage(lines.join('\n'), {
+      botToken: globalConfig.botToken,
+      chatId,
+    });
+    if (sendRes.ok) {
+      digestSentAny = true;
+    } else if (sendRes.error) {
+      lastDigestErr = sendRes.error;
+    }
+  }
 
-  if (sendRes.ok) {
+  if (digestSentAny) {
     await supabase.from('settings').upsert(
       {
         key: 'last_daily_digest_date',
@@ -1484,9 +1952,159 @@ async function maybeSendDailyDigest(globalConfig: TelegramRuntimeConfig): Promis
       },
       { onConflict: 'key' }
     );
-    console.log(`[Daily Digest] Sent successfully for ${dhakaDate}`);
+    console.log(`[Daily Digest] Sent successfully for ${dhakaDate} (${digestTargets.length} chat(s))`);
   } else {
-    console.error(`[Daily Digest] Failed to send: ${sendRes.error}`);
+    console.error(`[Daily Digest] Failed to send: ${lastDigestErr || 'No valid Chat ID'}`);
+  }
+}
+
+async function maybeSendDeadlineReminders(globalConfig: TelegramRuntimeConfig): Promise<void> {
+  if (!globalConfig.botToken || globalConfig.upcomingDeadlines.length === 0) {
+    return;
+  }
+
+  const { dhakaDate } = getDhakaDateAndHour();
+  const todayMs = Date.parse(`${dhakaDate}T00:00:00+06:00`);
+  if (Number.isNaN(todayMs)) return;
+
+  const updatedEntries: UpcomingDeadlineEntry[] = [];
+  let dirty = false;
+
+  for (const entry of globalConfig.upcomingDeadlines) {
+    const deadlineMs = Date.parse(`${entry.deadline_date}T00:00:00+06:00`);
+    if (Number.isNaN(deadlineMs)) {
+      dirty = true;
+      continue;
+    }
+
+    const daysLeft = Math.round((deadlineMs - todayMs) / (24 * 60 * 60 * 1000));
+    // মেয়াদোত্তীর্ণ হওয়ার ১ দিনের বেশি পুরোনো হলে তালিকা থেকে সরিয়ে দেওয়া হবে
+    if (daysLeft < -1) {
+      dirty = true;
+      continue;
+    }
+
+    const remindedDays = Array.isArray(entry.reminded_days) ? [...entry.reminded_days] : [];
+
+    if ((daysLeft === 2 || daysLeft === 1 || daysLeft === 0) && !remindedDays.includes(daysLeft)) {
+      const dayLabel =
+        daysLeft === 0
+          ? 'আজই শেষ দিন!'
+          : daysLeft === 1
+          ? 'আগামীকাল শেষ দিন (১ দিন বাকি)'
+          : 'আর মাত্র ২ দিন বাকি';
+
+      const reminderText =
+        `⏰ ডেডলাইন রিমাইন্ডার (${dayLabel}) — ${entry.college_name}\n\n` +
+        `⏳ শেষ তারিখ: ${entry.deadline_date}\n` +
+        `📌 ${entry.title}\n` +
+        `🔗 ${entry.link}`;
+
+      const customChats = parseChatIdList(entry.chat_id);
+      const targetChats = customChats.length > 0 ? customChats : parseChatIdList(globalConfig.chatId);
+      const sentSet = new Set<string>();
+      let sentOk = false;
+
+      for (let i = 0; i < targetChats.length; i++) {
+        const cid = targetChats[i];
+        const res = await sendTelegramTextMessage(reminderText, {
+          botToken: globalConfig.botToken,
+          chatId: cid,
+          threadId:
+            customChats.length > 0 && i === 0 && entry.thread_id && entry.thread_id > 0
+              ? entry.thread_id
+              : undefined,
+        });
+        if (res.ok) {
+          sentOk = true;
+          sentSet.add(cid);
+        }
+      }
+
+      // ব্যক্তিগত সাবস্ক্রাইবারদেরও ডেডলাইন রিমাইন্ডার পাঠানো হবে
+      if (globalConfig.subscriptions.length > 0) {
+        const collegeLower = entry.college_name.toLowerCase();
+        const titleLower = entry.title.toLowerCase();
+        for (const sub of globalConfig.subscriptions) {
+          const cleanSubChat = String(sub.chat_id || '').trim();
+          if (!cleanSubChat || sentSet.has(cleanSubChat)) continue;
+          const kws = Array.isArray(sub.keywords) ? sub.keywords : [];
+          const matched = kws.some((kw) => {
+            const q = String(kw || '').trim().toLowerCase();
+            return q && (q === 'সব' || q === 'all' || collegeLower.includes(q) || titleLower.includes(q));
+          });
+          if (!matched) continue;
+          const subRes = await sendTelegramTextMessage(reminderText, {
+            botToken: globalConfig.botToken,
+            chatId: cleanSubChat,
+          });
+          if (subRes.ok) {
+            sentOk = true;
+            sentSet.add(cleanSubChat);
+          }
+        }
+      }
+
+      if (sentOk) {
+        remindedDays.push(daysLeft);
+        dirty = true;
+        console.log(
+          `[Deadline Reminder] Sent (${daysLeft}d left) for "${entry.title}" (${entry.deadline_date})`
+        );
+      }
+    }
+
+    updatedEntries.push({
+      ...entry,
+      reminded_days: remindedDays,
+    });
+  }
+
+  if (dirty) {
+    await supabase.from('settings').upsert(
+      {
+        key: 'upcoming_deadlines',
+        value: JSON.stringify(updatedEntries.slice(-100)),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+  }
+}
+
+async function maybeCleanupOldScanLogs(globalConfig: TelegramRuntimeConfig): Promise<void> {
+  const { dhakaDate } = getDhakaDateAndHour();
+  if (globalConfig.lastLogCleanupDate === dhakaDate) {
+    return;
+  }
+
+  const retentionDays = 60;
+  const cutoffIso = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    const { error } = await supabase
+      .from('test_runs')
+      .delete()
+      .lt('created_at', cutoffIso);
+
+    if (error) {
+      console.warn(`[Log Cleanup] Failed to clean old test_runs: ${error.message}`);
+      return;
+    }
+
+    await supabase.from('settings').upsert(
+      {
+        key: 'last_log_cleanup_date',
+        value: dhakaDate,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+    console.log(`[Log Cleanup] Cleaned scan logs older than ${retentionDays} days (< ${cutoffIso})`);
+  } catch (err: unknown) {
+    console.warn(
+      `[Log Cleanup] Exception: ${err instanceof Error ? err.message : String(err)}`
+    );
   }
 }
 
@@ -1850,6 +2468,8 @@ async function main() {
   }
 
   await maybeSendDailyDigest(globalConfig);
+  await maybeSendDeadlineReminders(globalConfig);
+  await maybeCleanupOldScanLogs(globalConfig);
 
   const summaryMsg = `${activeColleges.length} টি কলেজ চেক হয়েছে · নতুন নোটিশ ${totalNew} টি · টেলিগ্রাম প্রেরিত ${totalSent} টি`;
   await saveAutoScanSettingsStatus(failedColleges > 0 ? 'partial_error' : 'success', summaryMsg);

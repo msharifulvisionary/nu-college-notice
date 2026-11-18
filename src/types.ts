@@ -8,6 +8,8 @@ export interface SelectorConfig {
   title?: string;
   link_selector?: string;
   link?: string;
+  proxy_url?: string;
+  custom_headers?: Record<string, string>;
   [key: string]: unknown;
 }
 
@@ -54,6 +56,22 @@ export interface TelegramSettingsResponse {
   has_telegram_bot_token: boolean;
   telegram_chat_id: string;
   message?: string;
+}
+
+export interface AdminBroadcastPayload {
+  message: string;
+  image_url?: string;
+  target: 'all' | 'default' | 'custom';
+  custom_chat_ids?: string;
+}
+
+export interface AdminBroadcastResponse {
+  ok: boolean;
+  sent_count?: number;
+  total_targets?: number;
+  failed_count?: number;
+  message?: string;
+  error?: string;
 }
 
 export interface AutomationStatusResponse {

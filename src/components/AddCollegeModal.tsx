@@ -26,6 +26,7 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
   const [noticeUrl, setNoticeUrl] = useState('');
   const [telegramChatId, setTelegramChatId] = useState('');
   const [telegramThreadId, setTelegramThreadId] = useState('');
+  const [proxyUrl, setProxyUrl] = useState('');
   const [isActive, setIsActive] = useState(true);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -40,12 +41,18 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
       setTelegramThreadId(
         editingCollege.telegram_thread_id ? String(editingCollege.telegram_thread_id) : ''
       );
+      setProxyUrl(
+        typeof editingCollege.selector_config?.proxy_url === 'string'
+          ? editingCollege.selector_config.proxy_url
+          : ''
+      );
       setIsActive(Boolean(editingCollege.is_active));
     } else {
       setName('');
       setNoticeUrl('');
       setTelegramChatId('');
       setTelegramThreadId('');
+      setProxyUrl('');
       setIsActive(true);
     }
   }, [isOpen, editingCollege]);
@@ -71,13 +78,22 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
       parsedThread = num;
     }
 
+    const baseSelectorConfig = {
+      ...(editingCollege?.selector_config || DEFAULT_SELECTOR_CONFIG),
+    };
+    if (proxyUrl.trim()) {
+      baseSelectorConfig.proxy_url = proxyUrl.trim();
+    } else {
+      delete baseSelectorConfig.proxy_url;
+    }
+
     setIsSubmitting(true);
     try {
       await onSaveCollege(
         {
           name: name.trim(),
           notice_url: noticeUrl.trim(),
-          selector_config: editingCollege?.selector_config || DEFAULT_SELECTOR_CONFIG,
+          selector_config: baseSelectorConfig,
           is_active: isActive,
           telegram_chat_id: telegramChatId.trim() || null,
           telegram_thread_id: parsedThread,
@@ -153,20 +169,20 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
           <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
             <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-700">
               <MessageSquare className="w-3.5 h-3.5 text-sky-600" />
-              <span>আলাদা টেলিগ্রাম চ্যানেল / টপিক (ঐচ্ছিক)</span>
+              <span>আলাদা টেলিগ্রাম চ্যানেল / একাধিক গ্রুপ (ঐচ্ছিক)</span>
             </div>
             <p className="text-[11px] text-slate-500 -mt-1">
-              ফাঁকা রাখলে মূল/ডিফল্ট টেলিগ্রাম চ্যাটেই এই কলেজের নোটিশ যাবে।
+              ফাঁকা রাখলে ডিফল্ট চ্যাটে যাবে। একাধিক গ্রুপে পাঠাতে চাইলে কমা (,) দিয়ে Chat ID আলাদা করুন।
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                  কাস্টম Chat ID / @username
+                  কাস্টম Chat ID (কমা দিয়ে একাধিক)
                 </label>
                 <input
                   type="text"
-                  placeholder="যেমন: -1001234567890"
+                  placeholder="-100123..., -100456..."
                   value={telegramChatId}
                   onChange={(e) => setTelegramChatId(e.target.value)}
                   className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-sky-500"
@@ -188,6 +204,24 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
               </div>
             </div>
           </div>
+
+          <details className="rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2 text-xs">
+            <summary className="cursor-pointer font-semibold text-slate-600 select-none">
+              অতিরিক্ত নেটওয়ার্ক অপশন (ঐচ্ছিক)
+            </summary>
+            <div className="mt-2.5 space-y-1.5">
+              <label className="block text-[11px] font-semibold text-slate-600">
+                কাস্টম Proxy URL (যদি কলেজ সাইট সরাসরি GitHub IP ব্লক করে)
+              </label>
+              <input
+                type="text"
+                placeholder="যেমন: https://my-proxy.workers.dev/?url={url}"
+                value={proxyUrl}
+                onChange={(e) => setProxyUrl(e.target.value)}
+                className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+          </details>
 
           <label className="flex items-center space-x-2.5 cursor-pointer select-none pt-1">
             <input
