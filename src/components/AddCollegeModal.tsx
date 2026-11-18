@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Building2, Save, AlertCircle } from 'lucide-react';
-import { College, CollegePayload, SelectorConfig } from '../types';
+import { College, CollegePayload } from '../types';
 
 interface AddCollegeModalProps {
   isOpen: boolean;
@@ -8,22 +8,6 @@ interface AddCollegeModalProps {
   onClose: () => void;
   onSaveCollege: (payload: CollegePayload, collegeId?: string) => Promise<void>;
 }
-
-const AALO_PRESET = {
-  note: 'Aalo (SoftBD Ltd) platform notice board table',
-  row_selector: 'table tbody tr',
-  date_selector: 'td:nth-child(2)',
-  title_selector: 'td:nth-child(3)',
-  link_selector: 'td:nth-child(4) a',
-};
-
-const GENERIC_PRESET = {
-  note: 'Generic HTML table or list layout',
-  row_selector: 'table tbody tr, .notice-item',
-  date_selector: 'td:nth-child(2), .date',
-  title_selector: 'td:nth-child(3), .title',
-  link_selector: 'td:nth-child(4) a, a',
-};
 
 export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
   isOpen,
@@ -33,7 +17,10 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
 }) => {
   const [name, setName] = useState('');
   const [noticeUrl, setNoticeUrl] = useState('');
-  const [selectorJson, setSelectorJson] = useState(JSON.stringify(AALO_PRESET, null, 2));
+  const [rowSelector, setRowSelector] = useState('table tbody tr');
+  const [dateSelector, setDateSelector] = useState('td:nth-child(2)');
+  const [titleSelector, setTitleSelector] = useState('td:nth-child(3)');
+  const [linkSelector, setLinkSelector] = useState('td:nth-child(4) a');
   const [isActive, setIsActive] = useState(true);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -42,25 +29,26 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
     if (!isOpen) return;
     setSubmitError(null);
     if (editingCollege) {
+      const cfg = editingCollege.selector_config || {};
       setName(editingCollege.name);
       setNoticeUrl(editingCollege.notice_url);
-      setSelectorJson(JSON.stringify(editingCollege.selector_config || AALO_PRESET, null, 2));
+      setRowSelector(cfg.row_selector || cfg.item || 'table tbody tr');
+      setDateSelector(cfg.date_selector || cfg.date || 'td:nth-child(2)');
+      setTitleSelector(cfg.title_selector || cfg.title || 'td:nth-child(3)');
+      setLinkSelector(cfg.link_selector || cfg.link || 'td:nth-child(4) a');
       setIsActive(Boolean(editingCollege.is_active));
     } else {
       setName('');
       setNoticeUrl('');
-      setSelectorJson(JSON.stringify(AALO_PRESET, null, 2));
+      setRowSelector('table tbody tr');
+      setDateSelector('td:nth-child(2)');
+      setTitleSelector('td:nth-child(3)');
+      setLinkSelector('td:nth-child(4) a');
       setIsActive(true);
     }
   }, [isOpen, editingCollege]);
 
   if (!isOpen) return null;
-
-  const applyPreset = (preset: 'aalo' | 'generic') => {
-    const chosen = preset === 'aalo' ? AALO_PRESET : GENERIC_PRESET;
-    setSelectorJson(JSON.stringify(chosen, null, 2));
-    setSubmitError(null);
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -71,16 +59,8 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
       return;
     }
 
-    let parsedConfig: SelectorConfig;
-    try {
-      const parsed = JSON.parse(selectorJson);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        setSubmitError('selector_config অবশ্যই একটি বৈধ JSON অবজেক্ট ({ ... }) হতে হবে।');
-        return;
-      }
-      parsedConfig = parsed as SelectorConfig;
-    } catch {
-      setSubmitError('selector_config-এর JSON ফরম্যাট সঠিক নয়। কমা ও কোটেশন চেক করুন।');
+    if (!rowSelector.trim() || !titleSelector.trim() || !linkSelector.trim()) {
+      setSubmitError('Row, Title এবং Link সিলেক্টর ঘরগুলো পূরণ করুন।');
       return;
     }
 
@@ -90,7 +70,13 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
         {
           name: name.trim(),
           notice_url: noticeUrl.trim(),
-          selector_config: parsedConfig,
+          selector_config: {
+            ...(editingCollege?.selector_config || {}),
+            row_selector: rowSelector.trim(),
+            date_selector: dateSelector.trim(),
+            title_selector: titleSelector.trim(),
+            link_selector: linkSelector.trim(),
+          },
           is_active: isActive,
         },
         editingCollege?.id
@@ -126,30 +112,8 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
               {isEditing ? 'কলেজের তথ্য এডিট করুন' : 'নতুন কলেজ যোগ করুন'}
             </h3>
             <p className="text-xs text-slate-500">
-              কলেজের নাম, নোটিশ বোর্ড URL এবং JSON সিলেক্টর কনফিগারেশন দিন
+              কলেজের নাম, নোটিশ বোর্ড URL এবং সিলেক্টর তথ্য দিন
             </p>
-          </div>
-        </div>
-
-        <div className="mt-4 p-3 bg-slate-50 border border-slate-200 rounded-xl">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-xs font-semibold text-slate-700">দ্রুত প্রিসেট (Quick Preset)</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => applyPreset('aalo')}
-              className="px-3 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-md text-xs font-medium transition-all cursor-pointer"
-            >
-              &quot;Aalo&quot; Platform (Govt. Azizul Haque ইত্যাদি)
-            </button>
-            <button
-              type="button"
-              onClick={() => applyPreset('generic')}
-              className="px-3 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-md text-xs font-medium transition-all cursor-pointer"
-            >
-              Generic HTML Table
-            </button>
           </div>
         </div>
 
@@ -182,18 +146,57 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              selector_config (JSON) *
-            </label>
-            <textarea
-              rows={7}
-              required
-              spellCheck={false}
-              value={selectorJson}
-              onChange={(e) => setSelectorJson(e.target.value)}
-              className="w-full bg-slate-900 text-emerald-300 border border-slate-700 rounded-xl px-3 py-2.5 text-xs font-mono leading-relaxed focus:outline-none focus:border-emerald-500"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                Row Selector *
+              </label>
+              <input
+                type="text"
+                required
+                value={rowSelector}
+                onChange={(e) => setRowSelector(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-emerald-500 focus:bg-white"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                Title Selector *
+              </label>
+              <input
+                type="text"
+                required
+                value={titleSelector}
+                onChange={(e) => setTitleSelector(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-emerald-500 focus:bg-white"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                Link Selector *
+              </label>
+              <input
+                type="text"
+                required
+                value={linkSelector}
+                onChange={(e) => setLinkSelector(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-emerald-500 focus:bg-white"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                Date Selector
+              </label>
+              <input
+                type="text"
+                value={dateSelector}
+                onChange={(e) => setDateSelector(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-emerald-500 focus:bg-white"
+              />
+            </div>
           </div>
 
           <label className="flex items-center space-x-2.5 cursor-pointer select-none pt-1">

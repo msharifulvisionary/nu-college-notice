@@ -3,6 +3,7 @@
   "name": "nu-college-notice",
   "main": "src/worker.ts",
   "compatibility_date": "2026-11-01",
+  "keep_vars": true,
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application",

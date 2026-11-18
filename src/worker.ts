@@ -10,11 +10,12 @@ export interface Env {
     fetch(input: Request | string | URL, init?: RequestInit): Promise<Response>;
   };
   // Cloudflare Worker Secrets / Runtime Environment Variables
-  SUPABASE_URL: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
-  ADMIN_EMAIL: string;
-  GITHUB_TOKEN: string;
-  GITHUB_REPO: string; // ফরম্যাট: "owner/repo"
+  SUPABASE_URL?: string;
+  VITE_SUPABASE_URL?: string; // ফলব্যাক হিসেবে ব্যবহৃত হতে পারে
+  SUPABASE_SERVICE_ROLE_KEY?: string;
+  ADMIN_EMAIL?: string;
+  GITHUB_TOKEN?: string;
+  GITHUB_REPO?: string; // ফরম্যাট: "owner/repo"
   GITHUB_BRANCH?: string; // অপশনাল (ডিফল্ট: "main")
 }
 
@@ -101,7 +102,16 @@ async function parseJsonBody<T>(
 
 // Supabase URL সাধারণ ফরম্যাটে আনার হেল্পার (শেষের "/" বাদ দেয়)
 function getCleanSupabaseUrl(env: Env): string {
-  return (env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
+  return (env.SUPABASE_URL || env.VITE_SUPABASE_URL || '').trim().replace(/\/+$/, '');
+}
+
+// GITHUB_REPO থেকে "owner/repo" অংশ বের করার হেল্পার
+function normalizeGithubRepo(rawRepo: string | undefined): string {
+  return (rawRepo || '')
+    .trim()
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/^\/+|\/+$/g, '');
 }
 
 // Supabase PostgREST API কল করার হেল্পার (Service Role Key সহ)
@@ -192,12 +202,18 @@ async function verifyAdminRequest(
   const serviceKey = (env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   const adminEmail = (env.ADMIN_EMAIL || '').trim().toLowerCase();
 
-  if (!baseUrl || !serviceKey || !adminEmail) {
+  const missingSecrets: string[] = [];
+  if (!baseUrl) missingSecrets.push('SUPABASE_URL');
+  if (!serviceKey) missingSecrets.push('SUPABASE_SERVICE_ROLE_KEY');
+  if (!adminEmail) missingSecrets.push('ADMIN_EMAIL');
+
+  if (missingSecrets.length > 0) {
     return {
       errorResponse: jsonResponse(
         {
-          error:
-            'সার্ভারে প্রয়োজনীয় সিক্রেট (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ADMIN_EMAIL) কনফিগার করা নেই।',
+          error: `সার্ভারে প্রয়োজনীয় Worker Runtime সিক্রেট (${missingSecrets.join(
+            ', '
+          )}) কনফিগার করা নেই। Cloudflare Worker > Settings > Variables and Secrets অংশে এগুলো যোগ করে পুনরায় ডিপ্লয় করুন (Build variables-এ দিলে রানটাইমে পাওয়া যায় না)।`,
         },
         500
       ),
@@ -644,14 +660,19 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
 // ============================================================================
 async function handleTriggerTestRun(request: Request, env: Env): Promise<Response> {
   const githubToken = (env.GITHUB_TOKEN || '').trim();
-  const githubRepo = (env.GITHUB_REPO || '').trim();
+  const githubRepo = normalizeGithubRepo(env.GITHUB_REPO);
   const githubBranch = (env.GITHUB_BRANCH || 'main').trim() || 'main';
 
-  if (!githubToken || !githubRepo) {
+  const missingGhSecrets: string[] = [];
+  if (!githubToken) missingGhSecrets.push('GITHUB_TOKEN');
+  if (!githubRepo) missingGhSecrets.push('GITHUB_REPO');
+
+  if (missingGhSecrets.length > 0) {
     return jsonResponse(
       {
-        error:
-          'Worker-এ GITHUB_TOKEN বা GITHUB_REPO সিক্রেট কনফিগার করা নেই। Cloudflare ড্যাশবোর্ড বা wrangler secret দিয়ে সেট করুন।',
+        error: `Worker-এ প্রয়োজনীয় সিক্রেট (${missingGhSecrets.join(
+          ', '
+        )}) কনফিগার করা নেই। Cloudflare Worker > Settings > Variables and Secrets অংশে যোগ করুন।`,
       },
       500
     );

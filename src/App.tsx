@@ -7,7 +7,6 @@ import { CollegeList, CollegeTestUiState } from './components/CollegeList';
 import { AddCollegeModal } from './components/AddCollegeModal';
 import { NoticeHistory } from './components/NoticeHistory';
 import { TelegramTester } from './components/TelegramTester';
-import { SqlCodeViewer } from './components/SqlCodeViewer';
 import { College, CollegePayload, Notice, SystemStatus } from './types';
 import {
   isSupabaseConfigured,
@@ -30,7 +29,7 @@ import {
   triggerAdminTestRun,
   fetchAdminTestRunStatus,
 } from './lib/adminApi';
-import { Building2, Layers, Send, FileCode, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Building2, Layers, Send, AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 function isAdminPath(): boolean {
   if (typeof window === 'undefined') return false;
@@ -41,7 +40,7 @@ export default function App() {
   const [currentView, setCurrentView] = useState<'home' | 'admin'>(() =>
     isAdminPath() ? 'admin' : 'home'
   );
-  const [activeTab, setActiveTab] = useState<'colleges' | 'notices' | 'telegram' | 'sql'>('colleges');
+  const [activeTab, setActiveTab] = useState<'colleges' | 'notices' | 'telegram'>('colleges');
 
   // Auth state (Supabase Auth)
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -507,18 +506,6 @@ export default function App() {
             <Send className="w-4 h-4 shrink-0" />
             <span>টেলিগ্রাম সেটিংস ও টেস্ট</span>
           </button>
-
-          <button
-            onClick={() => setActiveTab('sql')}
-            className={`flex items-center space-x-1.5 sm:space-x-2 px-3.5 sm:px-5 py-2.5 sm:py-3 text-xs font-bold rounded-lg transition-all cursor-pointer whitespace-nowrap flex-1 justify-center ${
-              activeTab === 'sql'
-                ? 'bg-emerald-600 text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-            }`}
-          >
-            <FileCode className="w-4 h-4 shrink-0" />
-            <span>SQL কোড</span>
-          </button>
         </div>
 
         {/* Tab Views */}
@@ -552,8 +539,6 @@ export default function App() {
             onTestTelegram={handleSendTelegramTest}
           />
         )}
-
-        {activeTab === 'sql' && <SqlCodeViewer />}
       </main>
 
       <AddCollegeModal
