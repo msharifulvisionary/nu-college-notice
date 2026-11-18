@@ -32,9 +32,9 @@ create table if not exists notices (
   unique(college_id, content_hash)
 );
 
--- Index for duplicate check performance
 create index if not exists idx_notices_college_hash on notices(college_id, content_hash);
 create index if not exists idx_notices_notified on notices(notified);
+create index if not exists idx_colleges_active on colleges(is_active);
 
 -- Enable RLS & allow public read via Publishable Key
 alter table colleges enable row level security;
@@ -47,6 +47,29 @@ create policy "Allow public read access on colleges"
 drop policy if exists "Allow public read access on notices" on notices;
 create policy "Allow public read access on notices"
   on notices for select to anon, authenticated using (true);
+
+-- 3. Create Settings Table (Service Role Only)
+create table if not exists settings (
+  key text primary key,
+  value text not null default '',
+  updated_at timestamptz default now()
+);
+
+-- 4. Create Test Runs Table (Service Role Only)
+create table if not exists test_runs (
+  id uuid primary key default gen_random_uuid(),
+  college_id uuid references colleges(id) on delete cascade,
+  status text not null default 'pending',
+  result jsonb,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_test_runs_college_id on test_runs(college_id);
+create index if not exists idx_test_runs_created_at on test_runs(created_at desc);
+
+alter table settings enable row level security;
+alter table test_runs enable row level security;
 
 -- Seed Initial Data: Govt. Azizul Haque College, Bogura
 insert into colleges (id, name, notice_url, selector_config, is_active)
@@ -79,7 +102,9 @@ on conflict (id) do nothing;`;
           </div>
           <div>
             <h2 className="text-sm sm:text-base font-bold text-slate-900">PostgreSQL Schema (SQL Code)</h2>
-            <p className="text-[11px] sm:text-xs text-slate-500">টেবিল স্ট্রাকচার এবং প্রাথমিক সিড ডাটা তৈরি করার SQL কোড</p>
+            <p className="text-[11px] sm:text-xs text-slate-500">
+              colleges, notices, settings এবং test_runs টেবিল তৈরি করার সম্পূর্ণ SQL কোড
+            </p>
           </div>
         </div>
 

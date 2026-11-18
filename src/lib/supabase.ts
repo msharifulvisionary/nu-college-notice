@@ -1,4 +1,4 @@
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 import { College, Notice } from '../types';
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim();
@@ -66,61 +66,40 @@ export async function fetchRecentNotices(limit = 100): Promise<Notice[]> {
     throw new Error(error.message);
   }
 
-  return (data || []).map((item: any) => ({
+  return (data || []).map((item: Notice & { colleges?: { name?: string } | null }) => ({
     ...item,
     college_name: item.colleges?.name || 'Govt. College',
   })) as Notice[];
 }
 
-export async function addCollege(
-  college: Omit<College, 'id' | 'created_at'>
-): Promise<College> {
-  if (!supabase) {
-    throw new Error('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
-  }
-
-  const { data, error } = await supabase
-    .from('colleges')
-    .insert([college])
-    .select()
-    .single();
-
+export async function getAdminSession(): Promise<Session | null> {
+  if (!supabase) return null;
+  const { data, error } = await supabase.auth.getSession();
   if (error) {
-    throw new Error(error.message);
+    console.warn('[Auth] Failed to read session:', error.message);
+    return null;
   }
-
-  return data as College;
+  return data.session;
 }
 
-export async function updateCollege(
-  id: string,
-  updates: Partial<College>
-): Promise<void> {
+export async function signInAdmin(email: string, password: string): Promise<Session> {
   if (!supabase) {
-    throw new Error('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
+    throw new Error('Supabase সেটিংস পাওয়া যায়নি।');
   }
 
-  const { error } = await supabase
-    .from('colleges')
-    .update(updates)
-    .eq('id', id);
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: email.trim(),
+    password,
+  });
 
-  if (error) {
-    throw new Error(error.message);
+  if (error || !data.session) {
+    throw new Error(error?.message || 'ভুল ইমেইল অথবা পাসওয়ার্ড! সঠিক তথ্য দিয়ে চেষ্টা করুন।');
   }
+
+  return data.session;
 }
 
-export async function deleteCollege(id: string): Promise<void> {
-  if (!supabase) {
-    throw new Error('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
-  }
-
-  const { error } = await supabase
-    .from('colleges')
-    .delete()
-    .eq('id', id);
-
-  if (error) {
-    throw new Error(error.message);
-  }
+export async function signOutAdmin(): Promise<void> {
+  if (!supabase) return;
+  await supabase.auth.signOut();
 }

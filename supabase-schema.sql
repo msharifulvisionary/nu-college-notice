@@ -48,6 +48,32 @@ create policy "Allow public read access on notices"
   to anon, authenticated
   using (true);
 
+-- 3. Create Settings Table (Admin Telegram Bot Token & Chat ID)
+-- শুধুমাত্র service_role key ব্যবহার করে Worker ও Scraper এই টেবিল পড়তে/লিখতে পারবে
+create table if not exists settings (
+  key text primary key,
+  value text not null default '',
+  updated_at timestamptz default now()
+);
+
+-- 4. Create Test Runs Table (On-demand college scraper test tracking)
+-- শুধুমাত্র service_role key ব্যবহার করে Worker ও Scraper এই টেবিল পড়তে/লিখতে পারবে
+create table if not exists test_runs (
+  id uuid primary key default gen_random_uuid(),
+  college_id uuid references colleges(id) on delete cascade,
+  status text not null default 'pending', -- pending | running | success | error
+  result jsonb,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_test_runs_college_id on test_runs(college_id);
+create index if not exists idx_test_runs_created_at on test_runs(created_at desc);
+
+-- Enable RLS on settings & test_runs with NO public policies (Service Role Only)
+alter table settings enable row level security;
+alter table test_runs enable row level security;
+
 -- =======================================================
 -- Seed Data: Govt. Azizul Haque College, Bogura & Others
 -- =======================================================

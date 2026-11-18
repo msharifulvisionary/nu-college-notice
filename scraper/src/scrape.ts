@@ -40,8 +40,12 @@ interface NoticeInsertRow {
 
 const SUPABASE_URL = process.env.SUPABASE_URL?.trim();
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim();
+const ENV_TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || '';
+const ENV_TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim() || '';
+
+const SCRAPE_MODE = (process.env.SCRAPE_MODE || 'normal').trim().toLowerCase();
+const TEST_COLLEGE_ID = (process.env.TEST_COLLEGE_ID || '').trim();
+const TEST_RUN_ID = (process.env.TEST_RUN_ID || '').trim();
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error('[Scraper] Missing required env vars: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
@@ -56,6 +60,53 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   },
 });
 
+interface TelegramRuntimeConfig {
+  botToken: string;
+  chatId: string;
+}
+
+class HttpStatusError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'HttpStatusError';
+    this.status = status;
+  }
+}
+
+async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
+  let dbToken = '';
+  let dbChatId = '';
+
+  try {
+    const { data, error } = await supabase
+      .from('settings')
+      .select('key, value')
+      .in('key', ['telegram_bot_token', 'telegram_chat_id']);
+
+    if (error) {
+      console.warn(`[Settings] Could not read settings table (${error.message}); using env fallback.`);
+    } else if (data) {
+      for (const row of data) {
+        if (row.key === 'telegram_bot_token' && typeof row.value === 'string') {
+          dbToken = row.value.trim();
+        }
+        if (row.key === 'telegram_chat_id' && typeof row.value === 'string') {
+          dbChatId = row.value.trim();
+        }
+      }
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[Settings] Settings query exception (${message}); using env fallback.`);
+  }
+
+  return {
+    botToken: dbToken || ENV_TELEGRAM_BOT_TOKEN,
+    chatId: dbChatId || ENV_TELEGRAM_CHAT_ID,
+  };
+}
+
 function generateNoticeHash(title: string, link: string): string {
   const normalizedTitle = title.trim().toLowerCase();
   const normalizedLink = link.trim().toLowerCase();
@@ -68,7 +119,7 @@ function generateNoticeHash(title: string, link: string): string {
 async function scrapeCollegeNotices(
   noticeUrl: string,
   selectorConfig: SelectorConfig = {}
-): Promise<ScrapedNotice[]> {
+): Promise<{ notices: ScrapedNotice[]; totalMatched: number }> {
   const controller = new AbortController();
   const timeoutMs = 10000;
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -93,7 +144,7 @@ async function scrapeCollegeNotices(
       console.error(
         `[Fetch HTTP Error] url=${noticeUrl} finalUrl=${response.url} status=${response.status} statusText="${response.statusText}" server="${response.headers.get('server') || 'unknown'}" cfRay="${response.headers.get('cf-ray') || 'none'}" bodyPreview="${bodyPreview}"`
       );
-      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+      throw new HttpStatusError(response.status, `HTTP ${response.status} ${response.statusText}`);
     }
 
     const html = await response.text();
@@ -153,8 +204,11 @@ async function scrapeCollegeNotices(
       });
     });
 
-    // Keep only the top 20 most recent notices
-    return notices.slice(0, 20);
+    // Keep only the top 20 most recent notices for baseline/normal processing
+    return {
+      notices: notices.slice(0, 20),
+      totalMatched: notices.length,
+    };
   } catch (err: unknown) {
     if (err instanceof Error) {
       const errWithCause = err as Error & { cause?: unknown };
@@ -192,16 +246,19 @@ function formatTelegramMessage(collegeName: string, notice: ScrapedNotice): stri
   return `🔔 নতুন নোটিশ — ${collegeName}${dateLine}\n\n📌 ${notice.title}\n🔗 ${notice.link}`;
 }
 
-async function sendTelegramMessage(text: string): Promise<{ ok: boolean; error?: string }> {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+async function sendTelegramMessage(
+  text: string,
+  telegramConfig: TelegramRuntimeConfig
+): Promise<{ ok: boolean; error?: string }> {
+  if (!telegramConfig.botToken || !telegramConfig.chatId) {
     return {
       ok: false,
-      error: 'TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set',
+      error: 'Telegram bot token or chat ID is not configured (checked settings table and env)',
     };
   }
 
-  const cleanChatId = TELEGRAM_CHAT_ID.replace(/^\./, '');
-  const endpoint = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const cleanChatId = telegramConfig.chatId.replace(/^\./, '');
+  const endpoint = `https://api.telegram.org/bot${telegramConfig.botToken}/sendMessage`;
 
   try {
     const res = await fetch(endpoint, {
@@ -226,10 +283,16 @@ async function sendTelegramMessage(text: string): Promise<{ ok: boolean; error?:
   }
 }
 
-async function processCollege(college: CollegeRow): Promise<{ newCount: number; sentCount: number }> {
+async function processCollege(
+  college: CollegeRow,
+  telegramConfig: TelegramRuntimeConfig
+): Promise<{ newCount: number; sentCount: number }> {
   console.log(`\n[College] Scraping ${college.name} (${college.notice_url})...`);
 
-  const scrapedNotices = await scrapeCollegeNotices(college.notice_url, college.selector_config);
+  const { notices: scrapedNotices } = await scrapeCollegeNotices(
+    college.notice_url,
+    college.selector_config
+  );
   console.log(`[College] Scraped ${scrapedNotices.length} recent notices (max 20) for ${college.name}`);
 
   if (scrapedNotices.length === 0) {
@@ -329,7 +392,7 @@ async function processCollege(college: CollegeRow): Promise<{ newCount: number; 
       date: row.date || undefined,
     });
 
-    const tgResult = await sendTelegramMessage(message);
+    const tgResult = await sendTelegramMessage(message, telegramConfig);
     if (tgResult.ok) {
       await supabase
         .from('notices')
@@ -346,8 +409,101 @@ async function processCollege(college: CollegeRow): Promise<{ newCount: number; 
   return { newCount: genuinelyNew.length, sentCount };
 }
 
+async function runTestMode(): Promise<void> {
+  if (!TEST_COLLEGE_ID || !TEST_RUN_ID) {
+    console.error('[Test Mode] Missing TEST_COLLEGE_ID or TEST_RUN_ID');
+    process.exit(1);
+  }
+
+  console.log(`[Test Mode] Running test scrape for college_id=${TEST_COLLEGE_ID}, test_run_id=${TEST_RUN_ID}`);
+
+  await supabase
+    .from('test_runs')
+    .update({ status: 'running', updated_at: new Date().toISOString() })
+    .eq('id', TEST_RUN_ID);
+
+  try {
+    const { data: college, error: collegeError } = await supabase
+      .from('colleges')
+      .select('id, name, notice_url, selector_config, is_active')
+      .eq('id', TEST_COLLEGE_ID)
+      .single();
+
+    if (collegeError || !college) {
+      throw new Error(collegeError?.message || `College not found: ${TEST_COLLEGE_ID}`);
+    }
+
+    const targetCollege = college as CollegeRow;
+    const { notices: scrapedNotices, totalMatched } = await scrapeCollegeNotices(
+      targetCollege.notice_url,
+      targetCollege.selector_config
+    );
+
+    const sample = scrapedNotices.slice(0, 5).map((item) => ({
+      title: item.title,
+      date: item.date || null,
+      link: item.link,
+    }));
+
+    const { error: updateError } = await supabase
+      .from('test_runs')
+      .update({
+        status: 'success',
+        updated_at: new Date().toISOString(),
+        result: {
+          college_name: targetCollege.name,
+          notice_url: targetCollege.notice_url,
+          parsed_count: totalMatched,
+          sample,
+        },
+      })
+      .eq('id', TEST_RUN_ID);
+
+    if (updateError) {
+      throw new Error(`Failed to save test_runs result: ${updateError.message}`);
+    }
+
+    console.log(
+      `[Test Mode] Success for ${targetCollege.name}: matched=${totalMatched}, sample=${sample.length} (no DB notices written, no Telegram sent)`
+    );
+  } catch (err: unknown) {
+    const errName = err instanceof Error ? err.name : 'UnknownError';
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const errStatus = err instanceof HttpStatusError ? err.status : undefined;
+
+    console.error('[Test Mode Error]', { name: errName, message: errMsg, status: errStatus });
+
+    await supabase
+      .from('test_runs')
+      .update({
+        status: 'error',
+        updated_at: new Date().toISOString(),
+        result: {
+          error: {
+            name: errName,
+            message: errMsg,
+            ...(errStatus !== undefined ? { status: errStatus } : {}),
+          },
+        },
+      })
+      .eq('id', TEST_RUN_ID);
+
+    process.exit(1);
+  }
+}
+
 async function main() {
-  console.log(`[Scraper] Notice check started at ${new Date().toISOString()}`);
+  console.log(`[Scraper] Notice check started at ${new Date().toISOString()} (mode=${SCRAPE_MODE})`);
+
+  if (SCRAPE_MODE === 'test') {
+    await runTestMode();
+    return;
+  }
+
+  const telegramConfig = await loadTelegramConfig();
+  console.log(
+    `[Settings] Telegram config loaded (botToken=${telegramConfig.botToken ? 'configured' : 'missing'}, chatId=${telegramConfig.chatId ? 'configured' : 'missing'})`
+  );
 
   const { data: colleges, error: collegesError } = await supabase
     .from('colleges')
@@ -368,7 +524,7 @@ async function main() {
 
   for (const college of activeColleges) {
     try {
-      const { newCount, sentCount } = await processCollege(college);
+      const { newCount, sentCount } = await processCollege(college, telegramConfig);
       totalNew += newCount;
       totalSent += sentCount;
     } catch (err: unknown) {

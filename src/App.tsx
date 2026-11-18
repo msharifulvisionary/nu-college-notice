@@ -1,61 +1,147 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { HomePage } from './components/HomePage';
 import { AdminLoginModal } from './components/AdminLoginModal';
 import { Header } from './components/Header';
 import { StatsCards } from './components/StatsCards';
-import { CollegeList } from './components/CollegeList';
+import { CollegeList, CollegeTestUiState } from './components/CollegeList';
 import { AddCollegeModal } from './components/AddCollegeModal';
 import { NoticeHistory } from './components/NoticeHistory';
 import { TelegramTester } from './components/TelegramTester';
 import { SqlCodeViewer } from './components/SqlCodeViewer';
-import { College, Notice, SystemStatus } from './types';
+import { College, CollegePayload, Notice, SystemStatus } from './types';
 import {
   isSupabaseConfigured,
+  supabase,
   getSupabaseUrl,
   testSupabaseConnection,
   fetchColleges,
   fetchRecentNotices,
-  addCollege,
-  updateCollege,
-  deleteCollege,
+  getAdminSession,
+  signOutAdmin,
 } from './lib/supabase';
-import { Building2, Layers, Send, FileCode, AlertTriangle } from 'lucide-react';
+import {
+  fetchAdminColleges,
+  createAdminCollege,
+  updateAdminCollege,
+  deleteAdminCollege,
+  fetchAdminSettings,
+  saveAdminSettings,
+  sendAdminTelegramTest,
+  triggerAdminTestRun,
+  fetchAdminTestRunStatus,
+} from './lib/adminApi';
+import { Building2, Layers, Send, FileCode, AlertTriangle, CheckCircle2 } from 'lucide-react';
+
+function isAdminPath(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.location.pathname.startsWith('/admin');
+}
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'home' | 'admin'>('home');
+  const [currentView, setCurrentView] = useState<'home' | 'admin'>(() =>
+    isAdminPath() ? 'admin' : 'home'
+  );
   const [activeTab, setActiveTab] = useState<'colleges' | 'notices' | 'telegram' | 'sql'>('colleges');
 
-  // Auth state
+  // Auth state (Supabase Auth)
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
-  const [adminUser, setAdminUser] = useState<{ username: string; role: string; name: string } | null>(null);
+  const [adminEmail, setAdminEmail] = useState<string>('');
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
 
-  // System state
+  // Public & Admin Data state
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [colleges, setColleges] = useState<College[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [isLoadingData, setIsLoadingData] = useState(false);
+  const [isLoadingAdminColleges, setIsLoadingAdminColleges] = useState(false);
   const [dataError, setDataError] = useState<string | null>(null);
+  const [actionBanner, setActionBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(
+    null
+  );
 
-  // Modals state
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  // Add/Edit College Modal & per-row loading
+  const [isCollegeModalOpen, setIsCollegeModalOpen] = useState(false);
+  const [editingCollege, setEditingCollege] = useState<College | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [testStates, setTestStates] = useState<Record<string, CollegeTestUiState>>({});
 
-  // Check saved session on mount
-  useEffect(() => {
-    const savedToken = localStorage.getItem('adminToken');
-    const savedUser = localStorage.getItem('adminUser');
-    if (savedToken && savedUser) {
-      setIsAdminLoggedIn(true);
-      try {
-        setAdminUser(JSON.parse(savedUser));
-      } catch {
-        setAdminUser({ username: 'admin', role: 'administrator', name: 'এডমিন' });
+  const activePollTimersRef = useRef<Record<string, number>>({});
+
+  const navigateView = useCallback((view: 'home' | 'admin') => {
+    setCurrentView(view);
+    if (typeof window !== 'undefined') {
+      const targetPath = view === 'admin' ? '/admin' : '/';
+      if (window.location.pathname !== targetPath) {
+        window.history.pushState({}, '', targetPath);
       }
     }
   }, []);
 
-  // Fetch initial data directly from Supabase (no /api routes)
-  const fetchData = useCallback(async () => {
+  // Sync browser back/forward button
+  useEffect(() => {
+    const handlePopState = () => {
+      setCurrentView(isAdminPath() ? 'admin' : 'home');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Cleanup active test polling timers on unmount
+  useEffect(() => {
+    return () => {
+      Object.keys(activePollTimersRef.current).forEach((collegeId) => {
+        window.clearTimeout(activePollTimersRef.current[collegeId]);
+      });
+    };
+  }, []);
+
+  // Initialize Supabase Auth session & listener
+  useEffect(() => {
+    let mounted = true;
+    const initSession = async () => {
+      const session = await getAdminSession();
+      if (!mounted) return;
+      setIsAdminLoggedIn(Boolean(session?.access_token));
+      setAdminEmail(session?.user?.email || '');
+      setIsAuthReady(true);
+    };
+    initSession();
+
+    if (!supabase) {
+      setIsAuthReady(true);
+      return;
+    }
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!mounted) return;
+      setIsAdminLoggedIn(Boolean(session?.access_token));
+      setAdminEmail(session?.user?.email || '');
+      setIsAuthReady(true);
+    });
+
+    return () => {
+      mounted = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  const handleUnauthorized = useCallback(
+    (reason?: string) => {
+      setIsAdminLoggedIn(false);
+      setAdminEmail('');
+      setAuthNotice(
+        reason || 'আপনার সেশন মেয়াদোত্তীর্ণ হয়েছে। অনুগ্রহ করে আবার এডমিন লগইন করুন।'
+      );
+      navigateView('admin');
+    },
+    [navigateView]
+  );
+
+  // Fetch public data directly from Supabase
+  const fetchPublicData = useCallback(async () => {
     setIsLoadingData(true);
     setDataError(null);
 
@@ -64,7 +150,7 @@ export default function App() {
         setStatus({
           supabase_connected: false,
           telegram_configured: false,
-          telegram_chat_id: 'GitHub Actions Managed',
+          telegram_chat_id: 'Database Configured',
           supabase_url: getSupabaseUrl(),
           node_env: import.meta.env.MODE || 'production',
         });
@@ -81,105 +167,211 @@ export default function App() {
       setStatus({
         supabase_connected: supabaseConnected,
         telegram_configured: true,
-        telegram_chat_id: 'GitHub Actions Managed',
+        telegram_chat_id: 'Database Configured',
         supabase_url: getSupabaseUrl(),
         node_env: import.meta.env.MODE || 'production',
       });
 
       setColleges(fetchedColleges);
       setNotices(fetchedNotices);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Error loading application data from Supabase:', err);
-      const errMsg = err?.message ? ` (${err.message})` : '';
+      const errMsg = err instanceof Error && err.message ? ` (${err.message})` : '';
       setDataError(`Supabase থেকে ডাটা আনতে সমস্যা হয়েছে${errMsg}`);
     } finally {
       setIsLoadingData(false);
     }
   }, []);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  // Load admin colleges via authenticated Worker endpoint
+  const loadAdminColleges = useCallback(async () => {
+    if (!isAdminLoggedIn) return;
+    setIsLoadingAdminColleges(true);
+    try {
+      const list = await fetchAdminColleges(handleUnauthorized);
+      setColleges(list);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'কলেজ তালিকা লোড করতে সমস্যা হয়েছে।';
+      setActionBanner({ type: 'error', text: msg });
+    } finally {
+      setIsLoadingAdminColleges(false);
+    }
+  }, [isAdminLoggedIn, handleUnauthorized]);
 
-  // Login handler
-  const handleLoginSuccess = (user: { username: string; role: string; name: string }) => {
+  useEffect(() => {
+    fetchPublicData();
+  }, [fetchPublicData]);
+
+  useEffect(() => {
+    if (currentView === 'admin' && isAdminLoggedIn) {
+      loadAdminColleges();
+    }
+  }, [currentView, isAdminLoggedIn, loadAdminColleges]);
+
+  const handleRefreshAll = useCallback(async () => {
+    await fetchPublicData();
+    if (currentView === 'admin' && isAdminLoggedIn) {
+      await loadAdminColleges();
+    }
+  }, [fetchPublicData, currentView, isAdminLoggedIn, loadAdminColleges]);
+
+  const handleLoginSuccess = () => {
+    setAuthNotice(null);
     setIsAdminLoggedIn(true);
-    setAdminUser(user);
-    setCurrentView('admin');
+    navigateView('admin');
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('adminToken');
-    localStorage.removeItem('adminUser');
+  const handleLogout = async () => {
+    await signOutAdmin();
     setIsAdminLoggedIn(false);
-    setAdminUser(null);
-    setCurrentView('home');
+    setAdminEmail('');
+    setAuthNotice(null);
+    navigateView('home');
   };
 
   const handleGoToAdminPanel = () => {
     if (isAdminLoggedIn) {
-      setCurrentView('admin');
+      navigateView('admin');
     } else {
       setIsLoginModalOpen(true);
     }
   };
 
-  // Direct Supabase college actions
-  const handleToggleActive = async (id: string, currentStatus: boolean) => {
+  // Admin College CRUD handlers (via Worker API)
+  const handleToggleActive = async (college: College) => {
+    setTogglingId(college.id);
+    setActionBanner(null);
     try {
-      await updateCollege(id, { is_active: !currentStatus });
-      setColleges((prev) =>
-        prev.map((c) => (c.id === id ? { ...c, is_active: !currentStatus } : c))
+      const res = await updateAdminCollege(
+        college.id,
+        { is_active: !college.is_active },
+        handleUnauthorized
       );
-    } catch (err) {
-      console.error('Toggle status failed:', err);
+      setColleges((prev) => prev.map((c) => (c.id === college.id ? res.college : c)));
+      setActionBanner({
+        type: 'success',
+        text: `${college.name} ${res.college.is_active ? 'সক্রিয়' : 'নিষ্ক্রিয়'} করা হয়েছে।`,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'স্ট্যাটাস পরিবর্তন করা যায়নি।';
+      setActionBanner({ type: 'error', text: msg });
+    } finally {
+      setTogglingId(null);
     }
   };
 
-  const handleDeleteCollege = async (id: string) => {
-    if (!window.confirm('আপনি কি এই কলেজটি মুছে ফেলতে চান?')) return;
+  const handleDeleteCollege = async (college: College) => {
+    setDeletingId(college.id);
+    setActionBanner(null);
     try {
-      await deleteCollege(id);
-      setColleges((prev) => prev.filter((c) => c.id !== id));
-    } catch (err) {
-      console.error('Delete college failed:', err);
+      const res = await deleteAdminCollege(college.id, handleUnauthorized);
+      setColleges((prev) => prev.filter((c) => c.id !== college.id));
+      setNotices((prev) => prev.filter((n) => n.college_id !== college.id));
+      setActionBanner({ type: 'success', text: res.message });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'কলেজ মুছে ফেলতে সমস্যা হয়েছে।';
+      setActionBanner({ type: 'error', text: msg });
+    } finally {
+      setDeletingId(null);
     }
   };
 
-  const handleAddCollege = async (collegeData: Omit<College, 'id' | 'created_at'>) => {
-    const newCollege = await addCollege(collegeData);
-    setColleges((prev) => [newCollege, ...prev]);
+  const handleSaveCollege = async (payload: CollegePayload, collegeId?: string) => {
+    setActionBanner(null);
+    if (collegeId) {
+      const res = await updateAdminCollege(collegeId, payload, handleUnauthorized);
+      setColleges((prev) => prev.map((c) => (c.id === collegeId ? res.college : c)));
+      setActionBanner({ type: 'success', text: res.message });
+    } else {
+      const res = await createAdminCollege(payload, handleUnauthorized);
+      setColleges((prev) => [res.college, ...prev]);
+      setActionBanner({ type: 'success', text: res.message });
+    }
   };
 
-  const handleTestTelegram = async (botToken?: string, chatId?: string, message?: string) => {
-    if (!botToken || !chatId) {
-      return { success: false, error: 'Telegram Bot Token এবং Chat ID দিন।' };
+  // Test Run Trigger + 3s Polling (max 2 minutes = 40 attempts)
+  const handleTestScrapeCollege = async (college: College) => {
+    if (activePollTimersRef.current[college.id]) {
+      window.clearTimeout(activePollTimersRef.current[college.id]);
+      delete activePollTimersRef.current[college.id];
     }
 
-    const cleanChatId = chatId.trim().replace(/^\./, '');
-    const text =
-      message ||
-      '🧪 Multi-College Notice Tracker\n\nটেলিগ্রাম বট কানেকশন সফলভাবে সম্পন্ন হয়েছে!';
+    setTestStates((prev) => ({
+      ...prev,
+      [college.id]: { isRunning: true, run: null, error: null },
+    }));
 
-    const response = await fetch(`https://api.telegram.org/bot${botToken.trim()}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: cleanChatId,
-        text,
-        disable_web_page_preview: false,
-      }),
-    });
+    try {
+      const triggerRes = await triggerAdminTestRun(college.id, handleUnauthorized);
+      const testRunId = triggerRes.test_run_id;
+      const startedAt = Date.now();
+      const maxDurationMs = 120000;
 
-    const data = await response.json();
-    if (response.ok && data.ok) {
-      return { success: true };
+      const pollStatus = async () => {
+        try {
+          const run = await fetchAdminTestRunStatus(testRunId, handleUnauthorized);
+
+          if (run.status === 'success' || run.status === 'error') {
+            setTestStates((prev) => ({
+              ...prev,
+              [college.id]: { isRunning: false, run, error: null },
+            }));
+            delete activePollTimersRef.current[college.id];
+            return;
+          }
+
+          if (Date.now() - startedAt >= maxDurationMs) {
+            setTestStates((prev) => ({
+              ...prev,
+              [college.id]: {
+                isRunning: false,
+                run,
+                error:
+                  '২ মিনিট পার হয়ে গেছে কিন্তু টেস্ট রান শেষ হয়নি। GitHub Actions লগ চেক করুন।',
+              },
+            }));
+            delete activePollTimersRef.current[college.id];
+            return;
+          }
+
+          activePollTimersRef.current[college.id] = window.setTimeout(pollStatus, 3000);
+        } catch (pollErr: unknown) {
+          const msg =
+            pollErr instanceof Error ? pollErr.message : 'টেস্ট রানের ফলাফল জানতে সমস্যা হয়েছে।';
+          setTestStates((prev) => ({
+            ...prev,
+            [college.id]: { isRunning: false, run: null, error: msg },
+          }));
+          delete activePollTimersRef.current[college.id];
+        }
+      };
+
+      activePollTimersRef.current[college.id] = window.setTimeout(pollStatus, 3000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'টেস্ট রান শুরু করতে সমস্যা হয়েছে।';
+      setTestStates((prev) => ({
+        ...prev,
+        [college.id]: { isRunning: false, run: null, error: msg },
+      }));
     }
-    return {
-      success: false,
-      error: data.description || 'Telegram message send failed',
-    };
   };
+
+  // Telegram Settings & Test handlers (via Worker API)
+  const handleLoadTelegramSettings = useCallback(
+    () => fetchAdminSettings(handleUnauthorized),
+    [handleUnauthorized]
+  );
+
+  const handleSaveTelegramSettings = useCallback(
+    (payload: { telegram_bot_token?: string; telegram_chat_id: string }) =>
+      saveAdminSettings(payload, handleUnauthorized),
+    [handleUnauthorized]
+  );
+
+  const handleSendTelegramTest = useCallback(
+    (message?: string) => sendAdminTelegramTest(message, handleUnauthorized),
+    [handleUnauthorized]
+  );
 
   // Render Public Home View
   if (currentView === 'home') {
@@ -189,7 +381,7 @@ export default function App() {
           colleges={colleges}
           notices={notices}
           onOpenAdminLogin={() => setIsLoginModalOpen(true)}
-          onRefreshNotices={fetchData}
+          onRefreshNotices={fetchPublicData}
           isRefreshing={isLoadingData}
           dataError={dataError}
           isAdminLoggedIn={isAdminLoggedIn}
@@ -205,20 +397,40 @@ export default function App() {
     );
   }
 
-  // Render Admin Panel View (Edge to Edge mobile responsive)
+  // Render full-page Admin Login screen when visiting /admin without an active Supabase session
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 text-xs font-semibold text-slate-600">
+        এডমিন সেশন যাচাই করা হচ্ছে...
+      </div>
+    );
+  }
+
+  if (!isAdminLoggedIn) {
+    return (
+      <AdminLoginModal
+        variant="page"
+        isOpen={true}
+        onClose={() => navigateView('home')}
+        onLoginSuccess={handleLoginSuccess}
+        initialMessage={authNotice}
+        onBackToHome={() => navigateView('home')}
+      />
+    );
+  }
+
+  // Render Authenticated Admin Panel View
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans antialiased selection:bg-emerald-100 selection:text-emerald-900">
-      {/* Top Admin Header */}
       <Header
         status={status}
-        onRefreshStatus={fetchData}
-        isRefreshing={isLoadingData}
-        onGoToHome={() => setCurrentView('home')}
+        onRefreshStatus={handleRefreshAll}
+        isRefreshing={isLoadingData || isLoadingAdminColleges}
+        onGoToHome={() => navigateView('home')}
         onLogout={handleLogout}
-        adminUser={adminUser}
+        adminUser={{ username: adminEmail || 'Admin', role: 'administrator', name: 'এডমিন' }}
       />
 
-      {/* Main Container - Edge to Edge on Mobile */}
       <main className="w-full max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 py-3 sm:py-6">
         {dataError && (
           <div
@@ -230,10 +442,35 @@ export default function App() {
           </div>
         )}
 
-        {/* Global Stats Overview */}
+        {actionBanner && (
+          <div
+            role="status"
+            className={`mb-4 rounded-xl p-3 sm:p-3.5 text-xs sm:text-sm font-semibold flex items-center justify-between gap-2 border shadow-xs ${
+              actionBanner.type === 'success'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : 'bg-rose-50 border-rose-200 text-rose-900'
+            }`}
+          >
+            <div className="flex items-center space-x-2">
+              {actionBanner.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              )}
+              <span>{actionBanner.text}</span>
+            </div>
+            <button
+              onClick={() => setActionBanner(null)}
+              className="text-xs font-bold opacity-70 hover:opacity-100 px-2 py-0.5 cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         <StatsCards colleges={colleges} notices={notices} />
 
-        {/* Navigation Tabs (Horizontal Scrollable edge-to-edge) */}
+        {/* Navigation Tabs */}
         <div className="flex border-b border-slate-200 mb-4 sm:mb-6 overflow-x-auto scrollbar-none bg-white rounded-xl p-1 shadow-xs border">
           <button
             onClick={() => setActiveTab('colleges')}
@@ -268,7 +505,7 @@ export default function App() {
             }`}
           >
             <Send className="w-4 h-4 shrink-0" />
-            <span>টেলিগ্রাম টেস্ট</span>
+            <span>টেলিগ্রাম সেটিংস ও টেস্ট</span>
           </button>
 
           <button
@@ -288,36 +525,45 @@ export default function App() {
         {activeTab === 'colleges' && (
           <CollegeList
             colleges={colleges}
+            isLoadingColleges={isLoadingAdminColleges}
+            togglingId={togglingId}
+            deletingId={deletingId}
+            testStates={testStates}
             onToggleActive={handleToggleActive}
+            onEditCollege={(college) => {
+              setEditingCollege(college);
+              setIsCollegeModalOpen(true);
+            }}
             onDeleteCollege={handleDeleteCollege}
-            onOpenAddModal={() => setIsAddModalOpen(true)}
-            onTestScrapeCollege={() => setIsAddModalOpen(true)}
+            onOpenAddModal={() => {
+              setEditingCollege(null);
+              setIsCollegeModalOpen(true);
+            }}
+            onTestScrapeCollege={handleTestScrapeCollege}
           />
         )}
 
-        {activeTab === 'notices' && (
-          <NoticeHistory notices={notices} colleges={colleges} />
-        )}
+        {activeTab === 'notices' && <NoticeHistory notices={notices} colleges={colleges} />}
 
         {activeTab === 'telegram' && (
-          <TelegramTester onTestTelegram={handleTestTelegram} />
+          <TelegramTester
+            onLoadSettings={handleLoadTelegramSettings}
+            onSaveSettings={handleSaveTelegramSettings}
+            onTestTelegram={handleSendTelegramTest}
+          />
         )}
 
         {activeTab === 'sql' && <SqlCodeViewer />}
       </main>
 
-      {/* Add College Modal */}
       <AddCollegeModal
-        isOpen={isAddModalOpen}
-        onClose={() => setIsAddModalOpen(false)}
-        onAddCollege={handleAddCollege}
-      />
-
-      {/* Admin Login Modal */}
-      <AdminLoginModal
-        isOpen={isLoginModalOpen}
-        onClose={() => setIsLoginModalOpen(false)}
-        onLoginSuccess={handleLoginSuccess}
+        isOpen={isCollegeModalOpen}
+        editingCollege={editingCollege}
+        onClose={() => {
+          setIsCollegeModalOpen(false);
+          setEditingCollege(null);
+        }}
+        onSaveCollege={handleSaveCollege}
       />
     </div>
   );
