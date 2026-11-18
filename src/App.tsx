@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { HomePage } from './components/HomePage';
 import { AdminLoginModal } from './components/AdminLoginModal';
 import { Header } from './components/Header';
@@ -8,14 +8,23 @@ import { AddCollegeModal } from './components/AddCollegeModal';
 import { NoticeHistory } from './components/NoticeHistory';
 import { TelegramTester } from './components/TelegramTester';
 import { SqlCodeViewer } from './components/SqlCodeViewer';
-import { RunScrapeModal } from './components/RunScrapeModal';
-import { College, Notice, SystemStatus, ScrapeAndNotifyResult } from './types';
-import { Building2, Layers, Send, FileCode, ShieldCheck } from 'lucide-react';
+import { College, Notice, SystemStatus } from './types';
+import {
+  isSupabaseConfigured,
+  getSupabaseUrl,
+  testSupabaseConnection,
+  fetchColleges,
+  fetchRecentNotices,
+  addCollege,
+  updateCollege,
+  deleteCollege,
+} from './lib/supabase';
+import { Building2, Layers, Send, FileCode } from 'lucide-react';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<'home' | 'admin'>('home');
   const [activeTab, setActiveTab] = useState<'colleges' | 'notices' | 'telegram' | 'sql'>('colleges');
-  
+
   // Auth state
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
   const [adminUser, setAdminUser] = useState<{ username: string; role: string; name: string } | null>(null);
@@ -25,13 +34,11 @@ export default function App() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [colleges, setColleges] = useState<College[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
+  const [isLoadingData, setIsLoadingData] = useState(false);
+  const [dataError, setDataError] = useState<string | null>(null);
 
   // Modals state
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [isRunModalOpen, setIsRunModalOpen] = useState(false);
-  const [isScraping, setIsScraping] = useState(false);
-  const [scrapeResult, setScrapeResult] = useState<ScrapeAndNotifyResult | null>(null);
-  const [scrapeError, setScrapeError] = useState<string | null>(null);
 
   // Check saved session on mount
   useEffect(() => {
@@ -41,44 +48,57 @@ export default function App() {
       setIsAdminLoggedIn(true);
       try {
         setAdminUser(JSON.parse(savedUser));
-      } catch (e) {
+      } catch {
         setAdminUser({ username: 'admin', role: 'administrator', name: 'এডমিন' });
       }
     }
   }, []);
 
-  // Fetch initial data
-  const fetchData = async () => {
+  // Fetch initial data directly from Supabase (no /api routes)
+  const fetchData = useCallback(async () => {
+    setIsLoadingData(true);
+    setDataError(null);
+
     try {
-      const statusRes = await fetch('/api/status');
-      if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        setStatus(statusData);
+      if (!isSupabaseConfigured) {
+        setStatus({
+          supabase_connected: false,
+          telegram_configured: false,
+          telegram_chat_id: 'GitHub Actions Managed',
+          supabase_url: getSupabaseUrl(),
+          node_env: import.meta.env.MODE || 'production',
+        });
+        setDataError('VITE_SUPABASE_URL এবং VITE_SUPABASE_PUBLISHABLE_KEY সেট করা নেই।');
+        return;
       }
 
-      const colRes = await fetch('/api/colleges');
-      if (colRes.ok) {
-        const colData = await colRes.json();
-        if (colData.success) {
-          setColleges(colData.colleges);
-        }
-      }
+      const [supabaseConnected, fetchedColleges, fetchedNotices] = await Promise.all([
+        testSupabaseConnection(),
+        fetchColleges(),
+        fetchRecentNotices(100),
+      ]);
 
-      const notRes = await fetch('/api/notices');
-      if (notRes.ok) {
-        const notData = await notRes.json();
-        if (notData.success) {
-          setNotices(notData.notices);
-        }
-      }
-    } catch (err) {
-      console.error('Error loading application data:', err);
+      setStatus({
+        supabase_connected: supabaseConnected,
+        telegram_configured: true,
+        telegram_chat_id: 'GitHub Actions Managed',
+        supabase_url: getSupabaseUrl(),
+        node_env: import.meta.env.MODE || 'production',
+      });
+
+      setColleges(fetchedColleges);
+      setNotices(fetchedNotices);
+    } catch (err: any) {
+      console.error('Error loading application data from Supabase:', err);
+      setDataError(err.message || 'Supabase থেকে ডাটা লোড করতে সমস্যা হয়েছে।');
+    } finally {
+      setIsLoadingData(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [fetchData]);
 
   // Login handler
   const handleLoginSuccess = (user: { username: string; role: string; name: string }) => {
@@ -103,19 +123,13 @@ export default function App() {
     }
   };
 
-  // College API actions
+  // Direct Supabase college actions
   const handleToggleActive = async (id: string, currentStatus: boolean) => {
     try {
-      const res = await fetch(`/api/colleges/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ is_active: !currentStatus }),
-      });
-      if (res.ok) {
-        setColleges((prev) =>
-          prev.map((c) => (c.id === id ? { ...c, is_active: !currentStatus } : c))
-        );
-      }
+      await updateCollege(id, { is_active: !currentStatus });
+      setColleges((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, is_active: !currentStatus } : c))
+      );
     } catch (err) {
       console.error('Toggle status failed:', err);
     }
@@ -124,72 +138,46 @@ export default function App() {
   const handleDeleteCollege = async (id: string) => {
     if (!window.confirm('আপনি কি এই কলেজটি মুছে ফেলতে চান?')) return;
     try {
-      const res = await fetch(`/api/colleges/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        setColleges((prev) => prev.filter((c) => c.id !== id));
-      }
+      await deleteCollege(id);
+      setColleges((prev) => prev.filter((c) => c.id !== id));
     } catch (err) {
       console.error('Delete college failed:', err);
     }
   };
 
   const handleAddCollege = async (collegeData: Omit<College, 'id' | 'created_at'>) => {
-    try {
-      const res = await fetch('/api/colleges', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(collegeData),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setColleges((prev) => [data.college, ...prev]);
-        }
-      }
-    } catch (err) {
-      console.error('Add college failed:', err);
-    }
-  };
-
-  const handleTestScrapeUrl = async (url: string, selectorConfig: any) => {
-    const res = await fetch('/api/scrape-college', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ notice_url: url, selector_config: selectorConfig }),
-    });
-    return await res.json();
+    const newCollege = await addCollege(collegeData);
+    setColleges((prev) => [newCollege, ...prev]);
   };
 
   const handleTestTelegram = async (botToken?: string, chatId?: string, message?: string) => {
-    const res = await fetch('/api/test-telegram', {
+    if (!botToken || !chatId) {
+      return { success: false, error: 'Telegram Bot Token এবং Chat ID দিন।' };
+    }
+
+    const cleanChatId = chatId.trim().replace(/^\./, '');
+    const text =
+      message ||
+      '🧪 Multi-College Notice Tracker\n\nটেলিগ্রাম বট কানেকশন সফলভাবে সম্পন্ন হয়েছে!';
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken.trim()}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ botToken, chatId, customMessage: message }),
+      body: JSON.stringify({
+        chat_id: cleanChatId,
+        text,
+        disable_web_page_preview: false,
+      }),
     });
-    return await res.json();
-  };
 
-  const handleRunScrapeNow = async () => {
-    setIsScraping(true);
-    setIsRunModalOpen(true);
-    setScrapeResult(null);
-    setScrapeError(null);
-
-    try {
-      const defaultToken = 'a8f3k29dLp9Xq7Rm4Zt1Wv6Yn0Bc5Hj';
-      const res = await fetch(`/api/scrape-and-notify?token=${defaultToken}`, { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
-        setScrapeResult(data.data);
-        fetchData();
-      } else {
-        setScrapeError(data.error || 'স্ক্র্যাপিং করতে ব্যর্থ হয়েছে');
-      }
-    } catch (err: any) {
-      setScrapeError(err.message || 'নেটওয়ার্ক কানেকশন ফেইল্ড');
-    } finally {
-      setIsScraping(false);
+    const data = await response.json();
+    if (response.ok && data.ok) {
+      return { success: true };
     }
+    return {
+      success: false,
+      error: data.description || 'Telegram message send failed',
+    };
   };
 
   // Render Public Home View
@@ -200,8 +188,9 @@ export default function App() {
           colleges={colleges}
           notices={notices}
           onOpenAdminLogin={() => setIsLoginModalOpen(true)}
-          onRunScrapeNow={handleRunScrapeNow}
-          isScraping={isScraping}
+          onRefreshNotices={fetchData}
+          isRefreshing={isLoadingData}
+          dataError={dataError}
           isAdminLoggedIn={isAdminLoggedIn}
           onGoToAdminPanel={handleGoToAdminPanel}
         />
@@ -211,14 +200,6 @@ export default function App() {
           onClose={() => setIsLoginModalOpen(false)}
           onLoginSuccess={handleLoginSuccess}
         />
-
-        <RunScrapeModal
-          isOpen={isRunModalOpen}
-          onClose={() => setIsRunModalOpen(false)}
-          result={scrapeResult}
-          isLoading={isScraping}
-          error={scrapeError}
-        />
       </>
     );
   }
@@ -226,13 +207,11 @@ export default function App() {
   // Render Admin Panel View (Edge to Edge mobile responsive)
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans antialiased selection:bg-emerald-100 selection:text-emerald-900">
-      
       {/* Top Admin Header */}
       <Header
         status={status}
         onRefreshStatus={fetchData}
-        onRunScrapeNow={handleRunScrapeNow}
-        isScraping={isScraping}
+        isRefreshing={isLoadingData}
         onGoToHome={() => setCurrentView('home')}
         onLogout={handleLogout}
         adminUser={adminUser}
@@ -240,7 +219,6 @@ export default function App() {
 
       {/* Main Container - Edge to Edge on Mobile */}
       <main className="w-full max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 py-3 sm:py-6">
-        
         {/* Global Stats Overview */}
         <StatsCards colleges={colleges} notices={notices} />
 
@@ -279,7 +257,7 @@ export default function App() {
             }`}
           >
             <Send className="w-4 h-4 shrink-0" />
-            <span>টেলিগ্রাম সেটিংস</span>
+            <span>টেলিগ্রাম টেস্ট</span>
           </button>
 
           <button
@@ -311,17 +289,10 @@ export default function App() {
         )}
 
         {activeTab === 'telegram' && (
-          <TelegramTester
-            defaultBotToken={process.env.TELEGRAM_BOT_TOKEN}
-            defaultChatId={process.env.TELEGRAM_CHAT_ID}
-            onTestTelegram={handleTestTelegram}
-          />
+          <TelegramTester onTestTelegram={handleTestTelegram} />
         )}
 
-        {activeTab === 'sql' && (
-          <SqlCodeViewer />
-        )}
-
+        {activeTab === 'sql' && <SqlCodeViewer />}
       </main>
 
       {/* Add College Modal */}
@@ -329,16 +300,6 @@ export default function App() {
         isOpen={isAddModalOpen}
         onClose={() => setIsAddModalOpen(false)}
         onAddCollege={handleAddCollege}
-        onTestScrapeUrl={handleTestScrapeUrl}
-      />
-
-      {/* Run Scrape Manual Execution Modal */}
-      <RunScrapeModal
-        isOpen={isRunModalOpen}
-        onClose={() => setIsRunModalOpen(false)}
-        result={scrapeResult}
-        isLoading={isScraping}
-        error={scrapeError}
       />
 
       {/* Admin Login Modal */}
@@ -347,7 +308,6 @@ export default function App() {
         onClose={() => setIsLoginModalOpen(false)}
         onLoginSuccess={handleLoginSuccess}
       />
-
     </div>
   );
 }

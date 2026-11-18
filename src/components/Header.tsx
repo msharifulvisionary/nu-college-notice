@@ -5,8 +5,7 @@ import { SystemStatus } from '../types';
 interface HeaderProps {
   status: SystemStatus | null;
   onRefreshStatus: () => void;
-  onRunScrapeNow: () => void;
-  isScraping: boolean;
+  isRefreshing: boolean;
   onGoToHome?: () => void;
   onLogout?: () => void;
   adminUser?: { username: string; role: string; name: string } | null;
@@ -14,8 +13,8 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   status,
-  onRunScrapeNow,
-  isScraping,
+  onRefreshStatus,
+  isRefreshing,
   onGoToHome,
   onLogout,
   adminUser,
@@ -60,16 +59,16 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
-            {/* Run Manual Scrape */}
+            {/* Refresh Data from Supabase */}
             <button
-              id="btn-run-scrape-now"
-              onClick={onRunScrapeNow}
-              disabled={isScraping}
+              id="btn-refresh-supabase"
+              onClick={onRefreshStatus}
+              disabled={isRefreshing}
               className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs rounded-lg shadow-xs transition-all disabled:opacity-50 cursor-pointer"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${isScraping ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">{isScraping ? 'স্ক্যান হচ্ছে...' : 'এখনই চেক করুন'}</span>
-              <span className="sm:hidden">{isScraping ? '...' : 'স্ক্যান'}</span>
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">{isRefreshing ? 'লোড হচ্ছে...' : 'রিফ্রেশ করুন'}</span>
+              <span className="sm:hidden">{isRefreshing ? '...' : 'রিফ্রেশ'}</span>
             </button>
 
             {/* Logout */}

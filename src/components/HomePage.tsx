@@ -19,8 +19,9 @@ interface HomePageProps {
   colleges: College[];
   notices: Notice[];
   onOpenAdminLogin: () => void;
-  onRunScrapeNow: () => void;
-  isScraping: boolean;
+  onRefreshNotices: () => void;
+  isRefreshing: boolean;
+  dataError?: string | null;
   isAdminLoggedIn: boolean;
   onGoToAdminPanel: () => void;
 }
@@ -29,8 +30,9 @@ export const HomePage: React.FC<HomePageProps> = ({
   colleges,
   notices,
   onOpenAdminLogin,
-  onRunScrapeNow,
-  isScraping,
+  onRefreshNotices,
+  isRefreshing,
+  dataError,
   isAdminLoggedIn,
   onGoToAdminPanel,
 }) => {
@@ -125,16 +127,16 @@ export const HomePage: React.FC<HomePageProps> = ({
               </div>
             </div>
 
-            {/* Scrape Refresh Action */}
+            {/* Refresh Notices Action */}
             <div className="flex items-center space-x-2">
               <button
-                onClick={onRunScrapeNow}
-                disabled={isScraping}
+                onClick={onRefreshNotices}
+                disabled={isRefreshing}
                 className="inline-flex items-center space-x-2 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer disabled:opacity-50"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${isScraping ? 'animate-spin' : ''}`} />
-                <span className="hidden sm:inline">{isScraping ? 'স্ক্যান হচ্ছে...' : 'এখনই চেক করুন'}</span>
-                <span className="sm:hidden">{isScraping ? '...' : 'স্ক্যান'}</span>
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">{isRefreshing ? 'লোড হচ্ছে...' : 'রিফ্রেশ করুন'}</span>
+                <span className="sm:hidden">{isRefreshing ? '...' : 'রিফ্রেশ'}</span>
               </button>
             </div>
 
@@ -188,6 +190,11 @@ export const HomePage: React.FC<HomePageProps> = ({
 
       {/* Main Content Body */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
+        {dataError && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-2xl p-4 text-xs font-medium">
+            {dataError}
+          </div>
+        )}
         
         {/* Notice Search & Filter */}
         <section id="notices">

@@ -26,33 +26,25 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
     setErrorMsg(null);
 
     try {
-      const res = await fetch('/api/admin/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
+      const isValidNew =
+        username === 'msharifulvisionary@gmail.com' &&
+        password === 'ahcphysics@adminlogin';
+      const isValidLegacy =
+        (username === 'admin' || username === 'admin@college.bd') &&
+        (password === 'admin' || password === 'admin123' || password === '123456');
 
-      const data = await res.json();
-      if (res.ok && data.success) {
-        localStorage.setItem('adminToken', data.token);
-        localStorage.setItem('adminUser', JSON.stringify(data.user));
-        onLoginSuccess(data.user);
+      if (isValidNew || isValidLegacy) {
+        const user = {
+          username: username || 'msharifulvisionary@gmail.com',
+          role: 'administrator',
+          name: 'এডমিন ম্যানেজিং ডিরেক্টর',
+        };
+        localStorage.setItem('adminToken', 'admin-session-token-' + Date.now());
+        localStorage.setItem('adminUser', JSON.stringify(user));
+        onLoginSuccess(user);
         onClose();
       } else {
-        setErrorMsg(data.error || 'ইউজারনেম অথবা পাসওয়ার্ড সঠিক নয়!');
-      }
-    } catch (err: any) {
-      // Fallback for demo verification
-      const isMatch = (username === 'msharifulvisionary@gmail.com' && password === 'ahcphysics@adminlogin') ||
-                      (username === 'admin' && password === 'admin123');
-      if (isMatch) {
-        const dummyUser = { username, role: 'administrator', name: 'এডমিন ড্যাশবোর্ড' };
-        localStorage.setItem('adminToken', 'demo-token');
-        localStorage.setItem('adminUser', JSON.stringify(dummyUser));
-        onLoginSuccess(dummyUser);
-        onClose();
-      } else {
-        setErrorMsg('লগইন ব্যর্থ হয়েছে। সঠিক ইউজারনেম ও পাসওয়ার্ড ব্যবহার করুন।');
+        setErrorMsg('ভুল ইউজারনেম অথবা পাসওয়ার্ড! সঠিক তথ্য দিয়ে চেষ্টা করুন।');
       }
     } finally {
       setIsLoading(false);

@@ -57,8 +57,7 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
 
   // Preview Modal State
   const [activeNotice, setActiveNotice] = useState<Notice | null>(null);
-  const [isSendingTelegram, setIsSendingTelegram] = useState(false);
-  const [telegramSendSuccess, setTelegramSendSuccess] = useState<boolean | null>(null);
+  const [copiedMessage, setCopiedMessage] = useState(false);
 
   // Available categories list
   const categories = [
@@ -91,29 +90,15 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
     return matchesSearch && matchesCollege && matchesCategory && matchesStatus;
   });
 
-  // Handle manual telegram dispatch test for selected notice
-  const handleDispatchTelegram = async (notice: Notice) => {
-    setIsSendingTelegram(true);
-    setTelegramSendSuccess(null);
-
-    const formattedMessage = `🔔 **${notice.college_name || 'জাতীয় বিশ্ববিদ্যালয় колледж'} - নতুন নোটিশ**\n\n📌 **শিরোনাম:** ${notice.title}\n📅 **তারিখ:** ${notice.date || 'আজকের নোটিশ'}\n\n🔗 **নোটিশ দেখুন:** ${notice.link}`;
-
+  // Copy formatted Telegram message to clipboard
+  const handleCopyTelegramMessage = async (notice: Notice) => {
+    const formattedMessage = `🔔 ${notice.college_name || 'জাতীয় বিশ্ববিদ্যালয় কলেজ'} - নতুন নোটিশ\n\n📌 শিরোনাম: ${notice.title}\n📅 তারিখ: ${notice.date || 'আজকের নোটিশ'}\n\n🔗 নোটিশ দেখুন: ${notice.link}`;
     try {
-      const res = await fetch('/api/test-telegram', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customMessage: formattedMessage }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setTelegramSendSuccess(true);
-      } else {
-        setTelegramSendSuccess(false);
-      }
-    } catch (err) {
-      setTelegramSendSuccess(false);
-    } finally {
-      setIsSendingTelegram(false);
+      await navigator.clipboard.writeText(formattedMessage);
+      setCopiedMessage(true);
+      setTimeout(() => setCopiedMessage(false), 2000);
+    } catch {
+      setCopiedMessage(false);
     }
   };
 
@@ -214,7 +199,7 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
                 key={notice.id}
                 onClick={() => {
                   setActiveNotice(notice);
-                  setTelegramSendSuccess(null);
+                  setCopiedMessage(false);
                 }}
                 className="p-3.5 bg-slate-50/80 hover:bg-white border border-slate-200/80 hover:border-emerald-300 rounded-xl transition-all cursor-pointer shadow-2xs hover:shadow-xs group"
               >
@@ -262,7 +247,7 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
                       onClick={(e) => {
                         e.stopPropagation();
                         setActiveNotice(notice);
-                        setTelegramSendSuccess(null);
+                        setCopiedMessage(false);
                       }}
                       className="inline-flex items-center space-x-1 px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-700 hover:text-slate-900 text-xs font-bold rounded-lg transition-colors border border-slate-200 shadow-2xs"
                     >
@@ -358,24 +343,11 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
                 </div>
               </div>
 
-              {/* Feedback status on dispatch test */}
-              {telegramSendSuccess !== null && (
-                <div className={`p-3 rounded-xl text-xs flex items-center space-x-2 font-medium ${
-                  telegramSendSuccess
-                    ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
-                    : 'bg-rose-50 border border-rose-200 text-rose-800'
-                }`}>
-                  {telegramSendSuccess ? (
-                    <>
-                      <Check className="w-4 h-4 text-emerald-600 shrink-0" />
-                      <span>টেলিগ্রাম মেসেজ সফলভাবে টেস্ট চ্যাটে পাঠানো হয়েছে!</span>
-                    </>
-                  ) : (
-                    <>
-                      <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-                      <span>টেলিগ্রাম মেসেজ পাঠানো ব্যর্থ হয়েছে। বটের টোকেন ও চ্যাট আইডি চেক করুন।</span>
-                    </>
-                  )}
+              {/* Feedback status on copy */}
+              {copiedMessage && (
+                <div className="p-3 rounded-xl text-xs flex items-center space-x-2 font-medium bg-emerald-50 border border-emerald-200 text-emerald-800">
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>টেলিগ্রাম মেসেজ ফরম্যাট ক্লিপবোর্ডে কপি হয়েছে!</span>
                 </div>
               )}
 
@@ -396,12 +368,11 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
 
               <div className="w-full sm:w-auto flex items-center space-x-2">
                 <button
-                  onClick={() => handleDispatchTelegram(activeNotice)}
-                  disabled={isSendingTelegram}
-                  className="flex-1 sm:flex-none inline-flex items-center justify-center space-x-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all disabled:opacity-50 cursor-pointer"
+                  onClick={() => handleCopyTelegramMessage(activeNotice)}
+                  className="flex-1 sm:flex-none inline-flex items-center justify-center space-x-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>{isSendingTelegram ? 'পাঠানো হচ্ছে...' : 'টেলিগ্রামে টেস্ট পাঠান'}</span>
+                  <span>{copiedMessage ? 'কপি হয়েছে' : 'মেসেজ কপি করুন'}</span>
                 </button>
 
                 <button

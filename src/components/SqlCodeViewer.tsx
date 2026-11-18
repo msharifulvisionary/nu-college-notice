@@ -23,7 +23,7 @@ create table if not exists notices (
   id uuid primary key default gen_random_uuid(),
   college_id uuid references colleges(id) on delete cascade,
   title text not null,
-  link text not null,
+  link text not null unique,
   date text,
   content_hash text not null,
   notified boolean default false,
@@ -35,6 +35,18 @@ create table if not exists notices (
 -- Index for duplicate check performance
 create index if not exists idx_notices_college_hash on notices(college_id, content_hash);
 create index if not exists idx_notices_notified on notices(notified);
+
+-- Enable RLS & allow public read via Publishable Key
+alter table colleges enable row level security;
+alter table notices enable row level security;
+
+drop policy if exists "Allow public read access on colleges" on colleges;
+create policy "Allow public read access on colleges"
+  on colleges for select to anon, authenticated using (true);
+
+drop policy if exists "Allow public read access on notices" on notices;
+create policy "Allow public read access on notices"
+  on notices for select to anon, authenticated using (true);
 
 -- Seed Initial Data: Govt. Azizul Haque College, Bogura
 insert into colleges (id, name, notice_url, selector_config, is_active)

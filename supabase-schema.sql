@@ -17,9 +17,9 @@ create table if not exists notices (
   id uuid primary key default gen_random_uuid(),
   college_id uuid references colleges(id) on delete cascade,
   title text not null,
-  link text not null,
+  link text not null unique,
   date text,
-  content_hash text not null, -- title + link sha256 hash for duplicate detection
+  content_hash text not null,
   notified boolean default false,
   notified_at timestamptz,
   created_at timestamptz default now(),
@@ -31,13 +31,22 @@ create index if not exists idx_notices_college_hash on notices(college_id, conte
 create index if not exists idx_notices_notified on notices(notified);
 create index if not exists idx_colleges_active on colleges(is_active);
 
--- Enable Row Level Security (RLS) - Optional for public read/write if using Service Role Key
+-- Enable Row Level Security (RLS)
 alter table colleges enable row level security;
 alter table notices enable row level security;
 
--- Allow service role full access
-create policy "Allow full access for service role on colleges" on colleges for all using (true);
-create policy "Allow full access for service role on notices" on notices for all using (true);
+-- Allow public (anon / publishable key) read access for Cloudflare Pages frontend
+drop policy if exists "Allow public read access on colleges" on colleges;
+create policy "Allow public read access on colleges"
+  on colleges for select
+  to anon, authenticated
+  using (true);
+
+drop policy if exists "Allow public read access on notices" on notices;
+create policy "Allow public read access on notices"
+  on notices for select
+  to anon, authenticated
+  using (true);
 
 -- =======================================================
 -- Seed Data: Govt. Azizul Haque College, Bogura & Others

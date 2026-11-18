@@ -12,8 +12,8 @@ export const TelegramTester: React.FC<TelegramTesterProps> = ({
   defaultChatId,
   onTestTelegram,
 }) => {
-  const [botToken, setBotToken] = useState(defaultBotToken || '8688629221:AAEGxORabyf5KaKe6ixq0-N8LxAL_ycb4Ng');
-  const [chatId, setChatId] = useState(defaultChatId || '1961224877');
+  const [botToken, setBotToken] = useState(defaultBotToken || '');
+  const [chatId, setChatId] = useState(defaultChatId || '');
   const [customMsg, setCustomMsg] = useState('🔔 টেস্ট নোটিফিকেশন: Multi-College Notice Tracker সার্ভিস সচল আছে!');
 
   const [isLoading, setIsLoading] = useState(false);

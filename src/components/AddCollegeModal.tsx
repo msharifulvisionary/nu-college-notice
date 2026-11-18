@@ -1,19 +1,17 @@
 import React, { useState } from 'react';
-import { X, Building2, PlayCircle, Plus, Check, AlertCircle } from 'lucide-react';
+import { X, Building2, Plus, AlertCircle } from 'lucide-react';
 import { College } from '../types';
 
 interface AddCollegeModalProps {
   isOpen: boolean;
   onClose: () => void;
   onAddCollege: (college: Omit<College, 'id' | 'created_at'>) => Promise<void>;
-  onTestScrapeUrl: (url: string, selectorConfig: any) => Promise<any>;
 }
 
 export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
   isOpen,
   onClose,
   onAddCollege,
-  onTestScrapeUrl,
 }) => {
   if (!isOpen) return null;
 
@@ -23,11 +21,7 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
   const [dateSelector, setDateSelector] = useState('td:nth-child(2)');
   const [titleSelector, setTitleSelector] = useState('td:nth-child(3)');
   const [linkSelector, setLinkSelector] = useState('td:nth-child(4) a');
-  const [isActive, setIsActive] = useState(true);
-
-  const [isTesting, setIsTesting] = useState(false);
-  const [testResults, setTestResults] = useState<any>(null);
-  const [testError, setTestError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const applyPreset = (preset: 'aalo' | 'generic') => {
@@ -44,38 +38,12 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
     }
   };
 
-  const handleTestScrape = async () => {
-    if (!noticeUrl) return;
-    setIsTesting(true);
-    setTestError(null);
-    setTestResults(null);
-
-    const config = {
-      row_selector: rowSelector,
-      date_selector: dateSelector,
-      title_selector: titleSelector,
-      link_selector: linkSelector,
-    };
-
-    try {
-      const res = await onTestScrapeUrl(noticeUrl, config);
-      if (res.success) {
-        setTestResults(res.notices);
-      } else {
-        setTestError(res.error || 'স্ক্র্যাপ পরীক্ষায় সমস্যা দেখা দিয়েছে');
-      }
-    } catch (err: any) {
-      setTestError(err.message || 'নেটওয়ার্ক ত্রুটি');
-    } finally {
-      setIsTesting(false);
-    }
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !noticeUrl) return;
 
     setIsSubmitting(true);
+    setSubmitError(null);
     try {
       await onAddCollege({
         name,
@@ -86,11 +54,11 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
           title_selector: titleSelector,
           link_selector: linkSelector,
         },
-        is_active: isActive,
+        is_active: true,
       });
       onClose();
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      setSubmitError(err.message || 'কলেজ সেভ করতে সমস্যা হয়েছে।');
     } finally {
       setIsSubmitting(false);
     }
@@ -99,8 +67,6 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 overflow-y-auto">
       <div className="bg-white border border-slate-200 rounded-2xl max-w-xl w-full p-6 shadow-xl relative my-8">
-        
-        {/* Close Button */}
         <button
           onClick={onClose}
           className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
@@ -108,7 +74,6 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
           <X className="w-5 h-5" />
         </button>
 
-        {/* Modal Header */}
         <div className="flex items-center space-x-3 pb-4 border-b border-slate-100">
           <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
             <Building2 className="w-5 h-5" />
@@ -121,7 +86,6 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
           </div>
         </div>
 
-        {/* Quick Presets */}
         <div className="mt-4 p-3 bg-slate-50 border border-slate-200 rounded-xl">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs font-semibold text-slate-700">দ্রুত প্রিপ্রেসেট (Quick Preset)</span>
@@ -144,9 +108,7 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
           </div>
         </div>
 
-        {/* Form */}
         <form onSubmit={handleSubmit} className="mt-4 space-y-3.5">
-          
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
               কলেজের নাম *
@@ -175,7 +137,6 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
             />
           </div>
 
-          {/* Selectors */}
           <div className="grid grid-cols-2 gap-2.5 pt-1">
             <div>
               <label className="block text-[11px] font-semibold text-slate-600 mb-1">
@@ -229,40 +190,13 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
             </div>
           </div>
 
-          <div className="pt-1">
-            <button
-              type="button"
-              onClick={handleTestScrape}
-              disabled={!noticeUrl || isTesting}
-              className="w-full py-2 px-3 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all cursor-pointer disabled:opacity-50"
-            >
-              <PlayCircle className="w-4 h-4" />
-              <span>{isTesting ? 'চেক করা হচ্ছে...' : 'লাইভ টেস্ট স্ক্র্যাপ (Dry Run)'}</span>
-            </button>
-          </div>
-
-          {testError && (
+          {submitError && (
             <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs flex items-center space-x-2">
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-              <span>{testError}</span>
+              <span>{submitError}</span>
             </div>
           )}
 
-          {testResults && (
-            <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg max-h-36 overflow-y-auto text-xs space-y-1.5">
-              <p className="font-semibold text-emerald-700 flex items-center space-x-1">
-                <Check className="w-4 h-4" />
-                <span>সফলভাবে {testResults.length} টি নোটিশ পাওয়া গেছে</span>
-              </p>
-              {testResults.slice(0, 4).map((item: any, idx: number) => (
-                <div key={idx} className="text-slate-700 truncate border-b border-slate-200/60 pb-1">
-                  {idx + 1}. {item.title}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Action Buttons */}
           <div className="flex items-center justify-end space-x-3 pt-3 border-t border-slate-100">
             <button
               type="button"
@@ -281,9 +215,7 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
               <span>{isSubmitting ? 'সেভ হচ্ছে...' : 'কলেজ সেভ করুন'}</span>
             </button>
           </div>
-
         </form>
-
       </div>
     </div>
   );
