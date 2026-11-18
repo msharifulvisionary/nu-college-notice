@@ -43,6 +43,22 @@ jobs:
         working-directory: scraper
         run: npm ci
 
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('scraper/package-lock.json') }}
+
+      - name: Install Playwright Chromium
+        working-directory: scraper
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
+            npx playwright install chromium --with-deps
+          else
+            npx playwright install-deps chromium
+          fi
+
       - name: Run notice scraper
         working-directory: scraper
         env:

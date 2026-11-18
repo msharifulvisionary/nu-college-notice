@@ -131,16 +131,251 @@ function generateNoticeHash(title: string, link: string): string {
     .digest('hex');
 }
 
-async function scrapeCollegeNotices(
-  noticeUrl: string,
+function extractNoticesFromHtml(
+  html: string,
+  baseUrl: string,
   selectorConfig: SelectorConfig = {}
-): Promise<{ notices: ScrapedNotice[]; totalMatched: number }> {
+): { notices: ScrapedNotice[]; totalMatched: number } {
+  const $ = cheerio.load(html);
+
+  const rowSelector = selectorConfig.row_selector || selectorConfig.item || 'table tbody tr';
+  const titleSelector = selectorConfig.title_selector || selectorConfig.title || 'td:nth-child(3)';
+  const linkSelector = selectorConfig.link_selector || selectorConfig.link || 'td:nth-child(4) a, a';
+  const dateSelector = selectorConfig.date_selector || selectorConfig.date || 'td:nth-child(2)';
+
+  const notices: ScrapedNotice[] = [];
+  const seenLinks = new Set<string>();
+
+  const normalizeAbsoluteLink = (rawHref: string): string => {
+    const trimmed = rawHref.trim();
+    try {
+      return new URL(trimmed, baseUrl).href;
+    } catch {
+      return trimmed;
+    }
+  };
+
+  // Tier 1: Configured / default table row selectors
+  $(rowSelector).each((_, el) => {
+    const $row = $(el);
+
+    let title = titleSelector ? $row.find(titleSelector).text().trim() : '';
+    if (!title) {
+      title = $row.find('a').first().text().trim() || $row.text().trim();
+    }
+    title = title.replace(/\s+/g, ' ').trim();
+
+    let href = linkSelector ? $row.find(linkSelector).first().attr('href') || '' : '';
+    if (!href) {
+      $row.find('a').each((__, aEl) => {
+        const aHref = $(aEl).attr('href');
+        const aText = $(aEl).text().toLowerCase();
+        if (aHref && !href) {
+          href = aHref;
+        }
+        if (aHref && (aText.includes('view') || aText.includes('দেখুন'))) {
+          href = aHref;
+        }
+      });
+    }
+
+    if (!title || !href) return;
+
+    const absoluteLink = normalizeAbsoluteLink(href);
+    if (seenLinks.has(absoluteLink)) return;
+    seenLinks.add(absoluteLink);
+
+    const dateText = dateSelector
+      ? $row.find(dateSelector).text().replace(/\s+/g, ' ').trim()
+      : '';
+
+    notices.push({
+      title,
+      link: absoluteLink,
+      date: dateText || undefined,
+    });
+  });
+
+  // Tier 2: Classic fallback selectors for non-standard table/list notice layouts
+  if (notices.length === 0) {
+    $('.notice-list .notice-item, .notice-item, ul.list-group li, table tr').each((_, el) => {
+      const $row = $(el);
+      if ($row.closest('nav, header, footer').length > 0) return;
+      if ($row.find('th').length > 0 && $row.find('td').length === 0) return;
+
+      const $link = $row.find('a[href]').first();
+      const rawHref = ($link.attr('href') || '').trim();
+      if (!rawHref || rawHref === '#' || rawHref.startsWith('javascript:')) return;
+
+      const title = ($link.text().trim() || $row.text().trim()).replace(/\s+/g, ' ').trim();
+      if (!title || title.length < 4) return;
+
+      const absoluteLink = normalizeAbsoluteLink(rawHref);
+      if (seenLinks.has(absoluteLink)) return;
+      seenLinks.add(absoluteLink);
+
+      const dateText = $row
+        .find('.date, time, td:first-child, td:nth-child(2)')
+        .first()
+        .text()
+        .replace(/\s+/g, ' ')
+        .trim();
+      notices.push({
+        title,
+        link: absoluteLink,
+        date: dateText && dateText !== title ? dateText : undefined,
+      });
+    });
+  }
+
+  // Tier 3: Modern card / SPA semantic notice links (e.g., <a href="/notice/..."><h3>...</h3></a>)
+  if (notices.length === 0) {
+    const genericActionRegex =
+      /^(বিস্তারিত(\s*পড়ুন|\s*দেখুন)?|read\s*more|view(\s*more)?|see\s*more|দেখুন|ডাউনলোড(\s*করুন)?|download|pdf|click\s*here|সকল\s*নোটিশ(\s*দেখুন)?)$/i;
+    const noticeHrefRegex =
+      /(\/notices?\/|[?&](notice|notice_id|circular|slug)=|\.pdf(\?|$)|drive\.google\.com|res\.cloudinary\.com)/i;
+    const nonNoticePathRegex =
+      /^\/(about|college-history|contact|teachers?|staff|routines?|exam-routines?|syllabus|books?|pdf-books|gallery|admission|login|admin|faq|reviews?|donation|emergency|campus-map|notes?|lectures?|experiments?|merit|attendance|subject-list|subject-index|physics-tools|physics-formula|fun-features)/i;
+    const dateValueRegex =
+      /(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|[০-৯]{1,4}[-/\s][০-৯অ-হ]+|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b)/i;
+
+    let baseOrigin = '';
+    try {
+      baseOrigin = new URL(baseUrl).origin;
+    } catch {
+      baseOrigin = '';
+    }
+
+    $('a[href]').each((_, el) => {
+      const $link = $(el);
+      if ($link.closest('nav, header, footer, [role="navigation"]').length > 0) return;
+
+      const rawHref = ($link.attr('href') || '').trim();
+      if (
+        !rawHref ||
+        rawHref === '#' ||
+        rawHref.startsWith('#') ||
+        rawHref.startsWith('javascript:') ||
+        rawHref.startsWith('mailto:') ||
+        rawHref.startsWith('tel:')
+      ) {
+        return;
+      }
+
+      const absoluteLink = normalizeAbsoluteLink(rawHref);
+      let linkPathname = '';
+      try {
+        linkPathname = new URL(absoluteLink).pathname;
+      } catch {
+        linkPathname = '';
+      }
+
+      if (
+        absoluteLink === baseUrl ||
+        nonNoticePathRegex.test(linkPathname) ||
+        (baseOrigin &&
+          (absoluteLink === `${baseOrigin}/` ||
+            absoluteLink === `${baseOrigin}/notices` ||
+            absoluteLink === `${baseOrigin}/notice`))
+      ) {
+        return;
+      }
+
+      const $card = $link.closest(
+        'article, li, tr, div[class*="rounded"], div[class*="card"], div[class*="border"], div[class*="shadow"]'
+      );
+
+      const headingInLink = $link.find('h1, h2, h3, h4').first().text().replace(/\s+/g, ' ').trim();
+      let title = (headingInLink || $link.text()).replace(/\s+/g, ' ').trim();
+
+      if (!title || genericActionRegex.test(title)) {
+        const cardTitle = $card
+          .find('h1, h2, h3, h4, .title, [class*="title"]')
+          .first()
+          .text()
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (cardTitle && !genericActionRegex.test(cardTitle)) {
+          title = cardTitle;
+        }
+      }
+
+      const isStrongNoticeHref = noticeHrefRegex.test(absoluteLink);
+      const inNoticeContainer =
+        $link.closest('[class*="notice"], [id*="notice"]').length > 0 ||
+        Boolean(headingInLink && $card.length > 0 && /নোটিশ|notice/i.test($card.text()));
+      if (!isStrongNoticeHref && !inNoticeContainer) return;
+      if (!title || title.length < 6 || genericActionRegex.test(title)) return;
+
+      if (seenLinks.has(absoluteLink)) return;
+      seenLinks.add(absoluteLink);
+
+      let dateText = '';
+      if ($card.length > 0) {
+        const explicitDate = $card
+          .find('time, .date, [class*="date"]')
+          .first()
+          .text()
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (explicitDate && explicitDate !== title && explicitDate.length <= 45) {
+          dateText = explicitDate;
+        } else {
+          $card.find('span, div, p').each((__, spanEl) => {
+            if (dateText) return;
+            const candidate = $(spanEl).text().replace(/\s+/g, ' ').trim();
+            if (
+              candidate &&
+              candidate !== title &&
+              candidate.length >= 6 &&
+              candidate.length <= 36 &&
+              dateValueRegex.test(candidate)
+            ) {
+              dateText = candidate;
+            }
+          });
+        }
+      }
+
+      notices.push({
+        title,
+        link: absoluteLink,
+        date: dateText || undefined,
+      });
+    });
+  }
+
+  return {
+    notices: notices.slice(0, 20),
+    totalMatched: notices.length,
+  };
+}
+
+function looksLikeSpaHtml(html: string): boolean {
+  const lower = html.toLowerCase();
+  const hasSpaMount =
+    lower.includes('id="root"') ||
+    lower.includes("id='root'") ||
+    lower.includes('id="app"') ||
+    lower.includes('id="__next"') ||
+    lower.includes('id="__nuxt"');
+  const hasModuleScript = lower.includes('type="module"') || lower.includes("type='module'");
+
+  const $ = cheerio.load(html);
+  $('script, style, noscript').remove();
+  const visibleTextLength = $('body').text().replace(/\s+/g, ' ').trim().length;
+
+  return hasSpaMount || (hasModuleScript && visibleTextLength < 300);
+}
+
+async function fetchHtmlWithDetails(
+  targetUrl: string
+): Promise<{ ok: true; status: number; html: string; finalUrl: string } | { ok: false; status: number; statusText: string }> {
   const controller = new AbortController();
-  const timeoutMs = 10000;
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
 
   try {
-    const response = await fetch(noticeUrl, {
+    const response = await fetch(targetUrl, {
       method: 'GET',
       headers: {
         'User-Agent':
@@ -157,110 +392,155 @@ async function scrapeCollegeNotices(
         .trim()
         .slice(0, 200);
       console.error(
-        `[Fetch HTTP Error] url=${noticeUrl} finalUrl=${response.url} status=${response.status} statusText="${response.statusText}" server="${response.headers.get('server') || 'unknown'}" cfRay="${response.headers.get('cf-ray') || 'none'}" bodyPreview="${bodyPreview}"`
+        `[Fetch HTTP Error] url=${targetUrl} finalUrl=${response.url} status=${response.status} statusText="${response.statusText}" server="${response.headers.get('server') || 'unknown'}" cfRay="${response.headers.get('cf-ray') || 'none'}" bodyPreview="${bodyPreview}"`
       );
-      throw new HttpStatusError(response.status, `HTTP ${response.status} ${response.statusText}`);
+      return {
+        ok: false,
+        status: response.status,
+        statusText: response.statusText,
+      };
     }
 
     const html = await response.text();
-    const $ = cheerio.load(html);
+    return {
+      ok: true,
+      status: response.status,
+      html,
+      finalUrl: response.url || targetUrl,
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
-    const rowSelector = selectorConfig.row_selector || selectorConfig.item || 'table tbody tr';
-    const titleSelector = selectorConfig.title_selector || selectorConfig.title || 'td:nth-child(3)';
-    const linkSelector = selectorConfig.link_selector || selectorConfig.link || 'td:nth-child(4) a, a';
-    const dateSelector = selectorConfig.date_selector || selectorConfig.date || 'td:nth-child(2)';
+async function renderSpaWithPlaywright(
+  targetUrl: string,
+  options?: { spaOriginUrl?: string }
+): Promise<{ html: string; finalUrl: string }> {
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
 
-    const notices: ScrapedNotice[] = [];
-    const seenLinks = new Set<string>();
-
-    $(rowSelector).each((_, el) => {
-      const $row = $(el);
-
-      let title = titleSelector ? $row.find(titleSelector).text().trim() : '';
-      if (!title) {
-        title = $row.find('a').first().text().trim() || $row.text().trim();
-      }
-      title = title.replace(/\s+/g, ' ').trim();
-
-      let href = linkSelector ? $row.find(linkSelector).first().attr('href') || '' : '';
-      if (!href) {
-        $row.find('a').each((__, aEl) => {
-          const aHref = $(aEl).attr('href');
-          const aText = $(aEl).text().toLowerCase();
-          if (aHref && !href) {
-            href = aHref;
-          }
-          if (aHref && (aText.includes('view') || aText.includes('দেখুন'))) {
-            href = aHref;
-          }
-        });
-      }
-
-      if (!title || !href) return;
-
-      let absoluteLink = href.trim();
-      try {
-        absoluteLink = new URL(absoluteLink, noticeUrl).href;
-      } catch {
-        // Keep raw href if URL resolution fails
-      }
-
-      if (seenLinks.has(absoluteLink)) return;
-      seenLinks.add(absoluteLink);
-
-      const dateText = dateSelector
-        ? $row.find(dateSelector).text().replace(/\s+/g, ' ').trim()
-        : '';
-
-      notices.push({
-        title,
-        link: absoluteLink,
-        date: dateText || undefined,
-      });
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      locale: 'bn-BD',
     });
+    const page = await context.newPage();
 
-    // Fallback scan for non-standard layouts only if primary selector matched 0 notices
-    if (notices.length === 0) {
-      $('.notice-list .notice-item, .notice-item, ul.list-group li, table tr').each((_, el) => {
-        const $row = $(el);
-        if ($row.find('th').length > 0 && $row.find('td').length === 0) return;
+    const entryUrl = options?.spaOriginUrl || targetUrl;
+    await page.goto(entryUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
 
-        const $link = $row.find('a[href]').first();
-        const rawHref = ($link.attr('href') || '').trim();
-        if (!rawHref || rawHref === '#' || rawHref.startsWith('javascript:')) return;
+    await page
+      .waitForFunction(
+        () => (document.body?.innerText || '').replace(/\s+/g, ' ').trim().length > 80,
+        { timeout: 8000 }
+      )
+      .catch(() => {});
 
-        const title = ($link.text().trim() || $row.text().trim()).replace(/\s+/g, ' ').trim();
-        if (!title || title.length < 4) return;
+    if (options?.spaOriginUrl) {
+      const parsedTarget = new URL(targetUrl);
+      const targetPathname = parsedTarget.pathname;
+      const targetPathAndSearch = `${parsedTarget.pathname}${parsedTarget.search}${parsedTarget.hash}`;
 
-        let absoluteLink = rawHref;
-        try {
-          absoluteLink = new URL(absoluteLink, noticeUrl).href;
-        } catch {
-          // Keep raw href if URL resolution fails
+      // প্রথমে পেজের কোনো SPA <a href="/notices"> লিংকে ক্লিক করার চেষ্টা করা হচ্ছে
+      const clickedRoute = await page.evaluate((pathname) => {
+        const normalizedTarget = pathname.replace(/\/+$/, '') || '/';
+        const anchors = Array.from(document.querySelectorAll('a[href]'));
+        for (const anchor of anchors) {
+          const href = anchor.getAttribute('href') || '';
+          try {
+            const resolved = new URL(href, window.location.origin);
+            const normalizedHref = resolved.pathname.replace(/\/+$/, '') || '/';
+            if (resolved.origin === window.location.origin && normalizedHref === normalizedTarget) {
+              (anchor as HTMLAnchorElement).click();
+              return true;
+            }
+          } catch {
+            // ignore malformed href
+          }
         }
+        return false;
+      }, targetPathname);
 
-        if (seenLinks.has(absoluteLink)) return;
-        seenLinks.add(absoluteLink);
+      if (!clickedRoute) {
+        await page.evaluate((nextPath) => {
+          window.history.pushState({}, '', nextPath);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }, targetPathAndSearch);
+      }
 
-        const dateText = $row
-          .find('.date, time, td:first-child, td:nth-child(2)')
-          .first()
-          .text()
-          .replace(/\s+/g, ' ')
-          .trim();
-        notices.push({
-          title,
-          link: absoluteLink,
-          date: dateText && dateText !== title ? dateText : undefined,
-        });
-      });
+      await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+    } else {
+      await page.waitForTimeout(1000);
     }
 
-    // Keep only the top 20 most recent notices for baseline/normal processing
+    const html = await page.content();
     return {
-      notices: notices.slice(0, 20),
-      totalMatched: notices.length,
+      html,
+      finalUrl: page.url() || targetUrl,
     };
+  } finally {
+    await browser.close();
+  }
+}
+
+async function scrapeCollegeNotices(
+  noticeUrl: string,
+  selectorConfig: SelectorConfig = {}
+): Promise<{ notices: ScrapedNotice[]; totalMatched: number }> {
+  try {
+    const fetchResult = await fetchHtmlWithDetails(noticeUrl);
+
+    if (!fetchResult.ok) {
+      // যদি নির্দিষ্ট কোনো পাথ (যেমন /notices) 404 দেয়, কিন্তু মূল ডোমেইন (/) একটি সক্রিয় SPA হয়,
+      // তবে হেডলেস ব্রাউজারে মূল সাইট খুলে ক্লায়েন্ট-সাইড রাউটিং দিয়ে নোটিশ পড়া হবে
+      if (fetchResult.status === 404) {
+        const parsed = new URL(noticeUrl);
+        if (parsed.pathname && parsed.pathname !== '/') {
+          const originUrl = `${parsed.origin}/`;
+          const originRes = await fetchHtmlWithDetails(originUrl).catch(() => null);
+          if (originRes && originRes.ok && looksLikeSpaHtml(originRes.html)) {
+            console.log(
+              `[SPA Fallback] "${noticeUrl}" returned 404, but "${originUrl}" is an active SPA. Rendering via Playwright...`
+            );
+            const rendered = await renderSpaWithPlaywright(noticeUrl, { spaOriginUrl: originUrl });
+            return extractNoticesFromHtml(rendered.html, rendered.finalUrl, selectorConfig);
+          }
+        }
+      }
+
+      throw new HttpStatusError(
+        fetchResult.status,
+        `HTTP ${fetchResult.status} ${fetchResult.statusText}`
+      );
+    }
+
+    const staticParsed = extractNoticesFromHtml(
+      fetchResult.html,
+      fetchResult.finalUrl,
+      selectorConfig
+    );
+
+    if (staticParsed.notices.length > 0) {
+      return staticParsed;
+    }
+
+    // স্ট্যাটিক HTML-এ কোনো নোটিশ না পেলে এবং পেজটি JS/React SPA হলে Playwright দিয়ে রেন্ডার করা হবে
+    if (looksLikeSpaHtml(fetchResult.html)) {
+      console.log(
+        `[SPA Render] Static HTML had 0 notices and looks like a JS SPA (${noticeUrl}). Rendering via Playwright...`
+      );
+      const rendered = await renderSpaWithPlaywright(noticeUrl);
+      return extractNoticesFromHtml(rendered.html, rendered.finalUrl, selectorConfig);
+    }
+
+    return staticParsed;
   } catch (err: unknown) {
     if (err instanceof Error) {
       const errWithCause = err as Error & { cause?: unknown };
@@ -288,8 +568,6 @@ async function scrapeCollegeNotices(
       console.error('[Fetch Failed Details]', { url: noticeUrl, error: String(err) });
     }
     throw err;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
