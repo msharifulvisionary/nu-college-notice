@@ -52,6 +52,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: {
     persistSession: false,
     autoRefreshToken: false,
+    detectSessionInUrl: false,
   },
 });
 
@@ -85,6 +86,13 @@ async function scrapeCollegeNotices(
     });
 
     if (!response.ok) {
+      const bodyPreview = (await response.text().catch(() => ''))
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 200);
+      console.error(
+        `[Fetch HTTP Error] url=${noticeUrl} finalUrl=${response.url} status=${response.status} statusText="${response.statusText}" server="${response.headers.get('server') || 'unknown'}" cfRay="${response.headers.get('cf-ray') || 'none'}" bodyPreview="${bodyPreview}"`
+      );
       throw new Error(`HTTP ${response.status} ${response.statusText}`);
     }
 
@@ -147,6 +155,33 @@ async function scrapeCollegeNotices(
 
     // Keep only the top 20 most recent notices
     return notices.slice(0, 20);
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      const errWithCause = err as Error & { cause?: unknown };
+      const causeDetails = errWithCause.cause
+        ? errWithCause.cause instanceof Error
+          ? {
+              name: errWithCause.cause.name,
+              message: errWithCause.cause.message,
+              code: (errWithCause.cause as Error & { code?: string }).code,
+              errno: (errWithCause.cause as Error & { errno?: unknown }).errno,
+              syscall: (errWithCause.cause as Error & { syscall?: string }).syscall,
+              hostname: (errWithCause.cause as Error & { hostname?: string }).hostname,
+            }
+          : errWithCause.cause
+        : undefined;
+
+      console.error('[Fetch Failed Details]', {
+        url: noticeUrl,
+        name: err.name,
+        message: err.message,
+        timedOut: err.name === 'AbortError',
+        cause: causeDetails ?? null,
+      });
+    } else {
+      console.error('[Fetch Failed Details]', { url: noticeUrl, error: String(err) });
+    }
+    throw err;
   } finally {
     clearTimeout(timeoutId);
   }
