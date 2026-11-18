@@ -16,9 +16,11 @@ import {
   Copy,
   Check,
   Share2,
+  Eye,
 } from 'lucide-react';
 import { College, Notice } from '../types';
 import { sortNoticesByDateDesc } from '../lib/dateSort';
+import { NoticePreviewModal } from './NoticePreviewModal';
 
 interface HomePageProps {
   colleges: College[];
@@ -76,6 +78,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   const [selectedCollegeId, setSelectedCollegeId] = useState<string>('all');
   const [selectedCategory, setSelectedCategory] = useState<NoticeCategoryId>('all');
   const [copiedNoticeId, setCopiedNoticeId] = useState<string | null>(null);
+  const [previewNotice, setPreviewNotice] = useState<Notice | null>(null);
   const [logoClicks, setLogoClicks] = useState<number>(0);
   const [visibleCount, setVisibleCount] = useState<number>(INITIAL_NOTICE_COUNT);
 
@@ -382,12 +385,22 @@ export const HomePage: React.FC<HomePageProps> = ({
                         </h3>
                       </div>
 
-                      <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2 mt-2">
-                        <div className="flex items-center space-x-1.5">
+                      <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 mt-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setPreviewNotice(notice)}
+                            className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                            title="পূর্ণ স্ক্রিনে নোটিশের PDF বা ছবি প্রিভিউ ও ডাউনলোড করুন"
+                          >
+                            <Eye className="w-3.5 h-3.5 shrink-0" />
+                            <span>প্রিভিউ</span>
+                          </button>
+
                           <button
                             type="button"
                             onClick={() => handleCopyNotice(notice)}
-                            className={`inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                            className={`inline-flex items-center space-x-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                               isCopied
                                 ? 'bg-emerald-600 text-white border-emerald-600'
                                 : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
@@ -406,7 +419,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                             href={whatsappHref}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition-colors whitespace-nowrap shrink-0"
+                            className="inline-flex items-center space-x-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition-colors whitespace-nowrap shrink-0"
                             title="হোয়াটসঅ্যাপে শেয়ার করুন"
                           >
                             <Share2 className="w-3 h-3" />
@@ -541,6 +554,12 @@ export const HomePage: React.FC<HomePageProps> = ({
           </p>
         </div>
       </footer>
+      {/* Full-Screen Edge-to-Edge Notice Preview Modal */}
+      <NoticePreviewModal
+        notice={previewNotice}
+        onClose={() => setPreviewNotice(null)}
+        mode="public"
+      />
     </div>
   );
 };

@@ -2,23 +2,14 @@ import React, { useState, useMemo } from 'react';
 import {
   Layers,
   Search,
-  ExternalLink,
   CheckCircle2,
   Clock,
   Calendar,
   Eye,
-  Send,
-  X,
-  Building2,
-  Tag,
-  Hash,
-  Globe,
-  Sparkles,
-  Check,
-  AlertCircle
 } from 'lucide-react';
 import { Notice, College } from '../types';
 import { sortNoticesByDateDesc } from '../lib/dateSort';
+import { NoticePreviewModal } from './NoticePreviewModal';
 
 interface NoticeHistoryProps {
   notices: Notice[];
@@ -58,7 +49,6 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
 
   // Preview Modal State
   const [activeNotice, setActiveNotice] = useState<Notice | null>(null);
-  const [copiedMessage, setCopiedMessage] = useState(false);
 
   // Available categories list
   const categories = [
@@ -93,18 +83,6 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
 
     return matchesSearch && matchesCollege && matchesCategory && matchesStatus;
   });
-
-  // Copy formatted Telegram message to clipboard
-  const handleCopyTelegramMessage = async (notice: Notice) => {
-    const formattedMessage = `🔔 ${notice.college_name || 'জাতীয় বিশ্ববিদ্যালয় কলেজ'} - নতুন নোটিশ\n\n📌 শিরোনাম: ${notice.title}\n📅 তারিখ: ${notice.date || 'আজকের নোটিশ'}\n\n🔗 নোটিশ দেখুন: ${notice.link}`;
-    try {
-      await navigator.clipboard.writeText(formattedMessage);
-      setCopiedMessage(true);
-      setTimeout(() => setCopiedMessage(false), 2000);
-    } catch {
-      setCopiedMessage(false);
-    }
-  };
 
   return (
     <div className="bg-white border border-slate-200 rounded-xl sm:rounded-2xl p-3.5 sm:p-6 shadow-xs mb-8">
@@ -201,10 +179,7 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
             return (
               <div
                 key={notice.id}
-                onClick={() => {
-                  setActiveNotice(notice);
-                  setCopiedMessage(false);
-                }}
+                onClick={() => setActiveNotice(notice)}
                 className="p-3.5 bg-slate-50/80 hover:bg-white border border-slate-200/80 hover:border-emerald-300 rounded-xl transition-all cursor-pointer shadow-2xs hover:shadow-xs group"
               >
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
@@ -248,14 +223,14 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
                     )}
 
                     <button
+                      type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         setActiveNotice(notice);
-                        setCopiedMessage(false);
                       }}
-                      className="inline-flex items-center space-x-1 px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-700 hover:text-slate-900 text-xs font-bold rounded-lg transition-colors border border-slate-200 shadow-2xs"
+                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition-colors shadow-2xs whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      <Eye className="w-3.5 h-3.5 text-slate-500" />
+                      <Eye className="w-3.5 h-3.5 shrink-0" />
                       <span>প্রিভিউ</span>
                     </button>
                   </div>
@@ -267,131 +242,12 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
         </div>
       )}
 
-      {/* Notice Scraped Content Preview Modal */}
-      {activeNotice && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto">
-          <div className="bg-white border border-slate-200 rounded-2xl max-w-2xl w-full p-5 sm:p-6 shadow-2xl relative my-auto max-h-[90vh] overflow-y-auto">
-            
-            {/* Modal Header */}
-            <div className="flex items-start justify-between gap-3 pb-3.5 border-b border-slate-100">
-              <div className="space-y-1 pr-6">
-                <div className="flex items-center space-x-2">
-                  <span className="px-2.5 py-0.5 text-xs font-bold bg-emerald-100 text-emerald-800 rounded-lg">
-                    {activeNotice.college_name || 'Govt. College'}
-                  </span>
-                  <span className="px-2.5 py-0.5 text-xs font-bold bg-slate-100 text-slate-700 rounded-lg">
-                    {getNoticeCategory(activeNotice.title)}
-                  </span>
-                </div>
-                <h3 className="text-base font-bold text-slate-900 leading-snug pt-1">
-                  {activeNotice.title}
-                </h3>
-              </div>
-
-              <button
-                onClick={() => setActiveNotice(null)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors shrink-0 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Modal Body / Details */}
-            <div className="py-4 space-y-4">
-              
-              {/* Metadata Info Cards */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
-                <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-xl">
-                  <span className="text-[10px] text-slate-400 block font-medium">প্রকাশের তারিখ:</span>
-                  <span className="font-bold text-slate-800">{activeNotice.date || 'উল্লেখ নেই'}</span>
-                </div>
-
-                <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-xl">
-                  <span className="text-[10px] text-slate-400 block font-medium">টেলিগ্রাম স্ট্যাটাস:</span>
-                  <span className={`font-bold ${activeNotice.notified ? 'text-sky-600' : 'text-amber-600'}`}>
-                    {activeNotice.notified ? 'টেলিগ্রামে প্রেরিত' : 'প্রেরণ বাকি'}
-                  </span>
-                </div>
-
-                <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-xl col-span-2 sm:col-span-1">
-                  <span className="text-[10px] text-slate-400 block font-medium">কন্টেন্ট হ্যাশ (Hash):</span>
-                  <span className="font-mono text-[11px] text-slate-700 truncate block">
-                    {activeNotice.content_hash ? activeNotice.content_hash.substring(0, 12) + '...' : 'N/A'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Telegram Dispatch Message Preview Box */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                  <div className="flex items-center space-x-1.5">
-                    <Send className="w-4 h-4 text-sky-500" />
-                    <span>টেলিগ্রাম মেসেজ ডিসপ্যাচ প্রিভিউ (Telegram Format)</span>
-                  </div>
-                  <span className="text-[10px] text-slate-400 font-normal">বট মেসেজ ফরম্যাট</span>
-                </div>
-
-                <div className="bg-slate-900 text-slate-100 p-4 rounded-xl text-xs font-mono border border-slate-800 leading-relaxed space-y-2">
-                  <p className="text-emerald-400 font-bold">
-                    🔔 {activeNotice.college_name || 'জাতীয় বিশ্ববিদ্যালয় колледж'} - নতুন নোটিশ
-                  </p>
-                  <p className="text-slate-200">
-                    📌 <strong>শিরোনাম:</strong> {activeNotice.title}
-                  </p>
-                  <p className="text-slate-300">
-                    📅 <strong>তারিখ:</strong> {activeNotice.date || 'আজকের নোটিশ'}
-                  </p>
-                  <p className="text-sky-400 break-all">
-                    🔗 <strong>লিংক:</strong> {activeNotice.link}
-                  </p>
-                </div>
-              </div>
-
-              {/* Feedback status on copy */}
-              {copiedMessage && (
-                <div className="p-3 rounded-xl text-xs flex items-center space-x-2 font-medium bg-emerald-50 border border-emerald-200 text-emerald-800">
-                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>টেলিগ্রাম মেসেজ ফরম্যাট ক্লিপবোর্ডে কপি হয়েছে!</span>
-                </div>
-              )}
-
-            </div>
-
-            {/* Modal Actions */}
-            <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-2.5">
-              <a
-                href={activeNotice.link}
-                target="_blank"
-                rel="noreferrer"
-                className="w-full sm:w-auto inline-flex items-center justify-center space-x-1.5 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl transition-colors border border-slate-200 cursor-pointer"
-              >
-                <Globe className="w-4 h-4 text-slate-500" />
-                <span>মূল নোটিশ ওয়েবসাইট এ দেখুন</span>
-                <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
-              </a>
-
-              <div className="w-full sm:w-auto flex items-center space-x-2">
-                <button
-                  onClick={() => handleCopyTelegramMessage(activeNotice)}
-                  className="flex-1 sm:flex-none inline-flex items-center justify-center space-x-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>{copiedMessage ? 'কপি হয়েছে' : 'মেসেজ কপি করুন'}</span>
-                </button>
-
-                <button
-                  onClick={() => setActiveNotice(null)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer"
-                >
-                  বন্ধ করুন
-                </button>
-              </div>
-            </div>
-
-          </div>
-        </div>
-      )}
-
+      {/* Full-Screen Edge-to-Edge Notice Preview Modal */}
+      <NoticePreviewModal
+        notice={activeNotice}
+        onClose={() => setActiveNotice(null)}
+        mode="admin"
+      />
     </div>
   );
 };

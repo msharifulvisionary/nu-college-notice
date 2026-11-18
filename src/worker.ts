@@ -2938,6 +2938,720 @@ async function handleRegisterTelegramWebhook(request: Request, env: Env): Promis
 }
 
 // ============================================================================
+// নোটিশ PDF / ইমেজ প্রিভিউ এক্সট্র্যাকশন ও নিরাপদ ডাউনলোড প্রক্সি হ্যান্ডলার
+// ============================================================================
+const PREVIEW_USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+];
+
+const MAX_PREVIEW_MEDIA_BYTES = 25 * 1024 * 1024; // সর্বোচ্চ ২৫ মেগাবাইট
+
+function isSafeExternalHttpUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '').replace(/^\[|\]$/g, '');
+    if (!host) return false;
+
+    if (
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal') ||
+      host === '0.0.0.0' ||
+      host === '::' ||
+      host === '::1' ||
+      host.startsWith('fe80:') ||
+      host.startsWith('fc') ||
+      host.startsWith('fd')
+    ) {
+      return false;
+    }
+
+    // প্রাইভেট IPv4 রেঞ্জ ব্লক (SSRF সুরক্ষা)
+    const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4Match) {
+      const [a, b] = [Number(ipv4Match[1]), Number(ipv4Match[2])];
+      if (
+        a === 0 ||
+        a === 10 ||
+        a === 127 ||
+        (a === 169 && b === 254) ||
+        (a === 172 && b >= 16 && b <= 31) ||
+        (a === 192 && b === 168) ||
+        (a === 100 && b >= 64 && b <= 127)
+      ) {
+        return false;
+      }
+    }
+
+    if (host.includes('::ffff:')) {
+      const mapped = host.split('::ffff:').pop() || '';
+      if (
+        mapped.startsWith('127.') ||
+        mapped.startsWith('10.') ||
+        mapped.startsWith('192.168.') ||
+        mapped.startsWith('169.254.')
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function decodeBasicHtmlEntities(input: string): string {
+  return input
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x2F;/gi, '/')
+    .replace(/&nbsp;/gi, ' ');
+}
+
+function normalizePreviewMediaUrl(rawUrl: string): string {
+  const trimmed = decodeBasicHtmlEntities(rawUrl).trim();
+  try {
+    const parsed = new URL(trimmed);
+
+    // Google Docs / Drive Viewer মোড়ক থেকে মূল URL বের করা
+    if (
+      (parsed.hostname === 'docs.google.com' || parsed.hostname === 'drive.google.com') &&
+      (parsed.pathname.includes('/viewer') || parsed.pathname.includes('/gview'))
+    ) {
+      const inner = parsed.searchParams.get('url');
+      if (inner && isSafeExternalHttpUrl(inner)) {
+        return normalizePreviewMediaUrl(inner);
+      }
+    }
+
+    // Google Drive শেয়ার লিংক -> সরাসরি ডাউনলোড লিংক
+    if (parsed.hostname.includes('drive.google.com')) {
+      const fileIdMatch = parsed.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+      const idParam = parsed.searchParams.get('id');
+      const fileId = fileIdMatch?.[1] || idParam;
+      if (fileId) {
+        return `https://drive.google.com/uc?export=download&id=${fileId}`;
+      }
+    }
+  } catch {
+    // ignore parse failure
+  }
+  return trimmed;
+}
+
+function looksLikePdfLink(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    const pathname = parsed.pathname.toLowerCase();
+    return (
+      pathname.endsWith('.pdf') ||
+      (parsed.hostname.includes('drive.google.com') && parsed.search.includes('export=download')) ||
+      (parsed.hostname.includes('res.cloudinary.com') &&
+        (pathname.includes('/raw/') || pathname.endsWith('.pdf')))
+    );
+  } catch {
+    return /\.pdf(\?|#|$)/i.test(rawUrl);
+  }
+}
+
+function looksLikeImageLink(rawUrl: string): boolean {
+  try {
+    const pathname = new URL(rawUrl).pathname.toLowerCase();
+    return /\.(jpg|jpeg|png|webp|gif|bmp)$/.test(pathname);
+  } catch {
+    return /\.(jpg|jpeg|png|webp|gif|bmp)(\?|#|$)/i.test(rawUrl);
+  }
+}
+
+function buildSafePreviewFilename(
+  title: string,
+  sourceUrl: string,
+  kind: 'pdf' | 'image',
+  contentType = ''
+): string {
+  const lowerCt = contentType.toLowerCase();
+  const defaultExt =
+    kind === 'pdf'
+      ? 'pdf'
+      : lowerCt.includes('png')
+        ? 'png'
+        : lowerCt.includes('webp')
+          ? 'webp'
+          : lowerCt.includes('gif')
+            ? 'gif'
+            : 'jpg';
+
+  try {
+    const pathname = new URL(sourceUrl).pathname;
+    const rawSegment = decodeURIComponent(pathname.split('/').pop() || '');
+    const allowed = kind === 'pdf' ? /\.pdf$/i : /\.(jpg|jpeg|png|webp|gif)$/i;
+    if (allowed.test(rawSegment) && rawSegment.length > 4 && rawSegment.length <= 90) {
+      return rawSegment.replace(/[^a-zA-Z0-9._-]/g, '_');
+    }
+  } catch {
+    // fallback below
+  }
+
+  const asciiSlug = title
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '_')
+    .slice(0, 40);
+
+  return `${asciiSlug || 'college_notice'}.${defaultExt}`;
+}
+
+interface PreviewAttachmentCandidate {
+  kind: 'pdf' | 'image';
+  url: string;
+  filename: string;
+  previewUrl: string;
+  downloadUrl: string;
+}
+
+function makePreviewAttachmentObject(
+  kind: 'pdf' | 'image',
+  mediaUrl: string,
+  title: string,
+  contentType = ''
+): PreviewAttachmentCandidate {
+  const filename = buildSafePreviewFilename(title, mediaUrl, kind, contentType);
+  const encodedUrl = encodeURIComponent(mediaUrl);
+  const encodedName = encodeURIComponent(filename);
+  return {
+    kind,
+    url: mediaUrl,
+    filename,
+    previewUrl: `/api/media-proxy?url=${encodedUrl}&filename=${encodedName}`,
+    downloadUrl: `/api/media-proxy?url=${encodedUrl}&download=1&filename=${encodedName}`,
+  };
+}
+
+function extractHtmlAttribute(tag: string, attrName: string): string {
+  const pattern = new RegExp(
+    `\\b${attrName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+    'i'
+  );
+  const match = tag.match(pattern);
+  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? '').trim();
+}
+
+function extractAttachmentsAndTextFromHtml(
+  html: string,
+  baseUrl: string,
+  fallbackTitle: string
+): {
+  pageTitle: string | null;
+  textExcerpt: string | null;
+  attachments: PreviewAttachmentCandidate[];
+} {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const pageTitle = titleMatch
+    ? decodeBasicHtmlEntities(titleMatch[1].replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim()
+    : null;
+
+  // স্ক্রিপ্ট, স্টাইল, SVG বাদ দেওয়া
+  const cleanHtml = html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ');
+
+  // নেভ, হেডার, ফুটার বাদ দিয়ে মূল কনটেন্ট স্কোপ তৈরি (ফাঁকা হলে পুরো পেইজ ফলব্যাক)
+  const mainMatch =
+    cleanHtml.match(/<(main|article)\b[^>]*>([\s\S]*?)<\/\1>/i)?.[0] ||
+    cleanHtml
+      .replace(/<nav\b[^>]*>[\s\S]*?<\/nav>/gi, ' ')
+      .replace(/<header\b[^>]*>[\s\S]*?<\/header>/gi, ' ')
+      .replace(/<footer\b[^>]*>[\s\S]*?<\/footer>/gi, ' ');
+
+  const scanScope = mainMatch.trim().length > 80 ? mainMatch : cleanHtml;
+
+  const pdfCandidates: PreviewAttachmentCandidate[] = [];
+  const imageCandidates: PreviewAttachmentCandidate[] = [];
+  const seenUrls = new Set<string>();
+
+  const pushUrl = (rawAttr: string, preferKind?: 'pdf' | 'image') => {
+    const trimmed = decodeBasicHtmlEntities(rawAttr).trim();
+    if (
+      !trimmed ||
+      trimmed === '#' ||
+      trimmed.startsWith('data:') ||
+      trimmed.startsWith('javascript:') ||
+      trimmed.startsWith('mailto:') ||
+      trimmed.startsWith('tel:')
+    ) {
+      return;
+    }
+
+    let resolved = '';
+    try {
+      resolved = normalizePreviewMediaUrl(new URL(trimmed, baseUrl).href);
+    } catch {
+      return;
+    }
+
+    if (!isSafeExternalHttpUrl(resolved) || seenUrls.has(resolved)) return;
+
+    if (looksLikeImageLink(resolved)) {
+      const lower = resolved.toLowerCase();
+      if (
+        lower.includes('logo') ||
+        lower.includes('favicon') ||
+        lower.includes('avatar') ||
+        lower.endsWith('.svg')
+      ) {
+        return;
+      }
+      seenUrls.add(resolved);
+      imageCandidates.push(makePreviewAttachmentObject('image', resolved, fallbackTitle));
+      return;
+    }
+
+    if (looksLikePdfLink(resolved) || preferKind === 'pdf') {
+      seenUrls.add(resolved);
+      pdfCandidates.push(makePreviewAttachmentObject('pdf', resolved, fallbackTitle));
+    }
+  };
+
+  // ১. Anchor ট্যাগ (<a href="...">)
+  const anchorRegex = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let aMatch: RegExpExecArray | null;
+  while ((aMatch = anchorRegex.exec(scanScope)) !== null) {
+    const attrs = aMatch[1] || '';
+    const innerText = (aMatch[2] || '').replace(/<[^>]+>/g, ' ').trim();
+    const href = extractHtmlAttribute(`<a ${attrs}>`, 'href');
+    if (!href) continue;
+
+    const hasDownloadHint =
+      /\bdownload\b/i.test(attrs) ||
+      /ডাউনলোড|download|pdf|পিডিএফ|view\s*notice|attachment/i.test(innerText) ||
+      looksLikePdfLink(href) ||
+      looksLikeImageLink(href) ||
+      href.toLowerCase().includes('drive.google.com');
+
+    if (hasDownloadHint) {
+      pushUrl(href, looksLikeImageLink(href) ? 'image' : looksLikePdfLink(href) || href.toLowerCase().includes('drive.google.com') ? 'pdf' : undefined);
+    }
+  }
+
+  // ২. iframe / embed / object ট্যাগ
+  const embedRegex = /<(iframe|embed|object)\b([^>]*)>/gi;
+  let eMatch: RegExpExecArray | null;
+  while ((eMatch = embedRegex.exec(scanScope)) !== null) {
+    const fullTag = eMatch[0];
+    const src =
+      extractHtmlAttribute(fullTag, 'src') ||
+      extractHtmlAttribute(fullTag, 'data');
+    if (!src) continue;
+    const normalizedSrc = src.toLowerCase();
+    if (
+      normalizedSrc.includes('.pdf') ||
+      normalizedSrc.includes('drive.google.com') ||
+      normalizedSrc.includes('docs.google.com') ||
+      normalizedSrc.includes('pdfjs') ||
+      normalizedSrc.includes('viewer')
+    ) {
+      pushUrl(src, 'pdf');
+    }
+  }
+
+  // ৩. Img ট্যাগ (স্ক্যান করা নোটিশ ছবি খুঁজতে — লোগো/আইকন/ছোট ছবি বাদ দিয়ে)
+  const imgRegex = /<img\b([^>]*)>/gi;
+  let iMatch: RegExpExecArray | null;
+  while ((iMatch = imgRegex.exec(scanScope)) !== null) {
+    const fullTag = iMatch[0];
+    const src =
+      extractHtmlAttribute(fullTag, 'data-src') ||
+      extractHtmlAttribute(fullTag, 'data-lazy-src') ||
+      extractHtmlAttribute(fullTag, 'src');
+    if (!src || src.startsWith('data:image/svg')) continue;
+
+    const lowerSrc = src.toLowerCase();
+    const alt = extractHtmlAttribute(fullTag, 'alt').toLowerCase();
+    const cls = extractHtmlAttribute(fullTag, 'class').toLowerCase();
+    const widthNum = Number(extractHtmlAttribute(fullTag, 'width') || 0);
+    const heightNum = Number(extractHtmlAttribute(fullTag, 'height') || 0);
+
+    if ((widthNum > 0 && widthNum < 90) || (heightNum > 0 && heightNum < 90)) continue;
+    if (
+      lowerSrc.includes('logo') ||
+      lowerSrc.includes('icon') ||
+      lowerSrc.includes('favicon') ||
+      lowerSrc.includes('avatar') ||
+      lowerSrc.includes('spinner') ||
+      lowerSrc.includes('loading') ||
+      lowerSrc.includes('emoji') ||
+      lowerSrc.includes('flag') ||
+      lowerSrc.endsWith('.svg') ||
+      alt.includes('logo') ||
+      cls.includes('logo') ||
+      cls.includes('avatar')
+    ) {
+      continue;
+    }
+
+    let resolvedImg = '';
+    try {
+      resolvedImg = normalizePreviewMediaUrl(new URL(decodeBasicHtmlEntities(src), baseUrl).href);
+    } catch {
+      continue;
+    }
+    if (!isSafeExternalHttpUrl(resolvedImg) || seenUrls.has(resolvedImg)) continue;
+    seenUrls.add(resolvedImg);
+    imageCandidates.push(makePreviewAttachmentObject('image', resolvedImg, fallbackTitle));
+  }
+
+  // ৪. পরিষ্কার টেক্সট সারসংক্ষেপ (যদি HTML নোটিশ হয়)
+  const plainText = decodeBasicHtmlEntities(
+    scanScope
+      .replace(/<\/(p|div|li|tr|h[1-6]|br)>/gi, '\n')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+  )
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, 3000);
+
+  return {
+    pageTitle: pageTitle || null,
+    textExcerpt: plainText || null,
+    attachments: [...pdfCandidates, ...imageCandidates].slice(0, 8),
+  };
+}
+
+async function fetchWithPreviewHeaders(
+  targetUrl: string,
+  timeoutMs = 13000
+): Promise<Response> {
+  let originHeader = '';
+  try {
+    originHeader = `${new URL(targetUrl).origin}/`;
+  } catch {
+    originHeader = '';
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(targetUrl, {
+      method: 'GET',
+      redirect: 'follow',
+      headers: {
+        'User-Agent': PREVIEW_USER_AGENTS[0],
+        Accept: 'text/html,application/pdf,image/*,*/*;q=0.8',
+        'Accept-Language': 'bn-BD,bn;q=0.9,en-US;q=0.8,en;q=0.7',
+        ...(originHeader ? { Referer: originHeader } : {}),
+      },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function handleNoticePreview(request: Request): Promise<Response> {
+  const reqUrl = new URL(request.url);
+  const rawNoticeUrl = (reqUrl.searchParams.get('url') || '').trim();
+  const noticeTitle = (reqUrl.searchParams.get('title') || 'college_notice').trim();
+
+  if (!rawNoticeUrl || !isSafeExternalHttpUrl(rawNoticeUrl)) {
+    return jsonResponse({ error: 'সঠিক ও নিরাপদ নোটিশ লিংক পাওয়া যায়নি।' }, 400);
+  }
+
+  const normalizedUrl = normalizePreviewMediaUrl(rawNoticeUrl);
+
+  // সরাসরি PDF বা ছবি URL হলে নেটওয়ার্ক অপেক্ষা ছাড়াই ফাস্ট রেসপন্স
+  if (looksLikePdfLink(normalizedUrl)) {
+    const item = makePreviewAttachmentObject('pdf', normalizedUrl, noticeTitle, 'application/pdf');
+    return new Response(
+      JSON.stringify({
+        kind: 'pdf',
+        originalUrl: rawNoticeUrl,
+        finalUrl: normalizedUrl,
+        pageTitle: noticeTitle,
+        textExcerpt: null,
+        attachments: [item],
+      }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'public, max-age=300',
+        },
+      }
+    );
+  }
+
+  if (looksLikeImageLink(normalizedUrl)) {
+    const item = makePreviewAttachmentObject('image', normalizedUrl, noticeTitle);
+    return new Response(
+      JSON.stringify({
+        kind: 'image',
+        originalUrl: rawNoticeUrl,
+        finalUrl: normalizedUrl,
+        pageTitle: noticeTitle,
+        textExcerpt: null,
+        attachments: [item],
+      }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'public, max-age=300',
+        },
+      }
+    );
+  }
+
+  try {
+    const res = await fetchWithPreviewHeaders(normalizedUrl, 13000);
+    const finalUrl = res.url || normalizedUrl;
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+
+    if (!res.ok) {
+      return jsonResponse(
+        {
+          kind: 'webpage',
+          originalUrl: rawNoticeUrl,
+          finalUrl,
+          pageTitle: noticeTitle,
+          textExcerpt: null,
+          attachments: [],
+          error: `কলেজ সার্ভার থেকে রেসপন্স আসেনি (HTTP ${res.status})।`,
+        },
+        200
+      );
+    }
+
+    if (contentType.includes('application/pdf')) {
+      const item = makePreviewAttachmentObject('pdf', finalUrl, noticeTitle, contentType);
+      return new Response(
+        JSON.stringify({
+          kind: 'pdf',
+          originalUrl: rawNoticeUrl,
+          finalUrl,
+          pageTitle: noticeTitle,
+          textExcerpt: null,
+          attachments: [item],
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'public, max-age=300',
+          },
+        }
+      );
+    }
+
+    if (contentType.startsWith('image/') && !contentType.includes('svg')) {
+      const item = makePreviewAttachmentObject('image', finalUrl, noticeTitle, contentType);
+      return new Response(
+        JSON.stringify({
+          kind: 'image',
+          originalUrl: rawNoticeUrl,
+          finalUrl,
+          pageTitle: noticeTitle,
+          textExcerpt: null,
+          attachments: [item],
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'public, max-age=300',
+          },
+        }
+      );
+    }
+
+    const html = await res.text();
+    const extracted = extractAttachmentsAndTextFromHtml(html, finalUrl, noticeTitle);
+    const detectedKind: 'pdf' | 'image' | 'webpage' =
+      extracted.attachments.length > 0 ? extracted.attachments[0].kind : 'webpage';
+
+    return new Response(
+      JSON.stringify({
+        kind: detectedKind,
+        originalUrl: rawNoticeUrl,
+        finalUrl,
+        pageTitle: extracted.pageTitle || noticeTitle,
+        textExcerpt: extracted.textExcerpt,
+        attachments: extracted.attachments,
+      }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'public, max-age=300',
+        },
+      }
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return jsonResponse(
+      {
+        kind: 'webpage',
+        originalUrl: rawNoticeUrl,
+        finalUrl: normalizedUrl,
+        pageTitle: noticeTitle,
+        textExcerpt: null,
+        attachments: [],
+        error: `নোটিশ পেইজ লোড করা যায়নি: ${msg}`,
+      },
+      200
+    );
+  }
+}
+
+async function resolveGoogleDriveConfirmationResponse(
+  initialRes: Response,
+  initialUrl: string
+): Promise<Response> {
+  const ct = (initialRes.headers.get('content-type') || '').toLowerCase();
+  if (!ct.includes('text/html') || !initialUrl.includes('drive.google.com')) {
+    return initialRes;
+  }
+
+  const html = await initialRes.text();
+  // Google Drive বড় ফাইলের ক্ষেত্রে usercontent ডাউনলোড ফর্ম দেখায়
+  const formActionMatch = html.match(/action="(https:\/\/drive\.usercontent\.google\.com\/download[^"]*)"/i);
+  if (formActionMatch?.[1]) {
+    const actionUrl = new URL(decodeBasicHtmlEntities(formActionMatch[1]));
+    const hiddenRegex = /<input[^>]+type=["']hidden["'][^>]*>/gi;
+    let hMatch: RegExpExecArray | null;
+    while ((hMatch = hiddenRegex.exec(html)) !== null) {
+      const tag = hMatch[0];
+      const name = extractHtmlAttribute(tag, 'name');
+      const val = extractHtmlAttribute(tag, 'value');
+      if (name) {
+        actionUrl.searchParams.set(name, decodeBasicHtmlEntities(val));
+      }
+    }
+    return fetchWithPreviewHeaders(actionUrl.toString(), 18000);
+  }
+
+  const confirmLinkMatch = html.match(/href="([^"]*export=download[^"]*confirm=[^"]*)"/i);
+  if (confirmLinkMatch?.[1]) {
+    const nextUrl = new URL(decodeBasicHtmlEntities(confirmLinkMatch[1]), 'https://drive.google.com').href;
+    if (isSafeExternalHttpUrl(nextUrl)) {
+      return fetchWithPreviewHeaders(nextUrl, 18000);
+    }
+  }
+
+  return new Response(html, {
+    status: initialRes.status,
+    headers: initialRes.headers,
+  });
+}
+
+async function handleMediaProxy(request: Request): Promise<Response> {
+  const reqUrl = new URL(request.url);
+  const rawTargetUrl = (reqUrl.searchParams.get('url') || '').trim();
+  const isDownload =
+    reqUrl.searchParams.get('download') === '1' ||
+    reqUrl.searchParams.get('download') === 'true';
+  const requestedFilename = (reqUrl.searchParams.get('filename') || '').trim();
+
+  if (!rawTargetUrl || !isSafeExternalHttpUrl(rawTargetUrl)) {
+    return jsonResponse({ error: 'সঠিক ও নিরাপদ মিডিয়া লিংক দেওয়া হয়নি।' }, 400);
+  }
+
+  const normalizedUrl = normalizePreviewMediaUrl(rawTargetUrl);
+  if (!isSafeExternalHttpUrl(normalizedUrl)) {
+    return jsonResponse({ error: 'অবৈধ মিডিয়া লিংক।' }, 400);
+  }
+
+  try {
+    let upstreamRes = await fetchWithPreviewHeaders(normalizedUrl, 18000);
+    upstreamRes = await resolveGoogleDriveConfirmationResponse(upstreamRes, upstreamRes.url || normalizedUrl);
+
+    if (!upstreamRes.ok) {
+      return jsonResponse(
+        { error: `মূল সার্ভার থেকে ফাইল আনা যায়নি (HTTP ${upstreamRes.status})।` },
+        502
+      );
+    }
+
+    const declaredLength = Number(upstreamRes.headers.get('content-length') || 0);
+    if (declaredLength > MAX_PREVIEW_MEDIA_BYTES) {
+      return jsonResponse({ error: 'ফাইলটি ২৫ মেগাবাইটের চেয়ে বড় হওয়ায় প্রিভিউ করা সম্ভব নয়।' }, 413);
+    }
+
+    let contentType = (upstreamRes.headers.get('content-type') || '').toLowerCase();
+    const finalUrl = upstreamRes.url || normalizedUrl;
+
+    if (contentType.includes('text/html')) {
+      return jsonResponse(
+        { error: 'উক্ত লিংকে সরাসরি PDF বা ছবি পাওয়া যায়নি (HTML পেইজ এসেছে)।' },
+        422
+      );
+    }
+
+    if (!contentType || contentType.includes('application/octet-stream')) {
+      if (looksLikePdfLink(finalUrl) || /\.pdf$/i.test(requestedFilename)) {
+        contentType = 'application/pdf';
+      } else if (/\.png(\?|#|$)/i.test(finalUrl) || /\.png$/i.test(requestedFilename)) {
+        contentType = 'image/png';
+      } else if (/\.webp(\?|#|$)/i.test(finalUrl) || /\.webp$/i.test(requestedFilename)) {
+        contentType = 'image/webp';
+      } else if (/\.gif(\?|#|$)/i.test(finalUrl) || /\.gif$/i.test(requestedFilename)) {
+        contentType = 'image/gif';
+      } else if (looksLikeImageLink(finalUrl)) {
+        contentType = 'image/jpeg';
+      }
+    }
+
+    const buffer = await upstreamRes.arrayBuffer();
+    if (buffer.byteLength === 0) {
+      return jsonResponse({ error: 'ফাইলটি খালি পাওয়া গেছে।' }, 422);
+    }
+    if (buffer.byteLength > MAX_PREVIEW_MEDIA_BYTES) {
+      return jsonResponse({ error: 'ফাইলটি ২৫ মেগাবাইটের চেয়ে বড়।' }, 413);
+    }
+
+    // PDF সিগনেচার (%PDF) যাচাই করে octet-stream থেকে application/pdf নির্ধারণ
+    const headerBytes = new Uint8Array(buffer.slice(0, 5));
+    const asciiPrefix = String.fromCharCode(...headerBytes);
+    if (asciiPrefix.startsWith('%PDF')) {
+      contentType = 'application/pdf';
+    }
+
+    const detectedKind: 'pdf' | 'image' = contentType.includes('pdf') ? 'pdf' : 'image';
+    const safeFilename = (
+      requestedFilename.replace(/[^a-zA-Z0-9._-]/g, '_') ||
+      buildSafePreviewFilename('college_notice', finalUrl, detectedKind, contentType)
+    ).slice(0, 100);
+
+    return new Response(buffer, {
+      status: 200,
+      headers: {
+        'Content-Type': contentType || 'application/octet-stream',
+        'Content-Disposition': `${isDownload ? 'attachment' : 'inline'}; filename="${safeFilename}"; filename*=UTF-8''${encodeURIComponent(safeFilename)}`,
+        'Access-Control-Allow-Origin': '*',
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'public, max-age=600',
+      },
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return jsonResponse({ error: `ফাইল প্রক্সি লোড ব্যর্থ হয়েছে: ${msg}` }, 502);
+  }
+}
+
+// ============================================================================
 // মেইন Cloudflare Worker fetch ও scheduled (Cron) হ্যান্ডলার
 // ============================================================================
 export default {
@@ -2947,6 +3661,22 @@ export default {
 
     // শুধুমাত্র /api/* রুটগুলো Worker নিজে হ্যান্ডেল করবে
     if (pathname.startsWith('/api/')) {
+      // পাবলিক ও এডমিন নোটিশ প্রিভিউ (PDF/ইমেজ/টেক্সট ডিটেকশন)
+      if (pathname === '/api/notice-preview') {
+        if (request.method !== 'GET') {
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+        return handleNoticePreview(request);
+      }
+
+      // পাবলিক ও এডমিন মিডিয়া প্রক্সি (ফোনে ইনলাইন প্রিভিউ ও সরাসরি ডাউনলোড)
+      if (pathname === '/api/media-proxy') {
+        if (request.method !== 'GET') {
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+        return handleMediaProxy(request);
+      }
+
       // টেলিগ্রাম বট ইন্টারেক্টিভ Webhook (/latest, /notice, /colleges, /help)
       if (pathname === '/api/telegram/webhook') {
         if (request.method !== 'POST') {

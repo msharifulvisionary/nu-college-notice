@@ -158,3 +158,22 @@ export interface SystemStatus {
   supabase_url: string;
   node_env: string;
 }
+
+export interface NoticePreviewAttachment {
+  kind: 'pdf' | 'image';
+  url: string;
+  filename: string;
+  previewUrl: string;
+  downloadUrl: string;
+}
+
+export interface NoticePreviewResponse {
+  kind: 'pdf' | 'image' | 'webpage';
+  originalUrl: string;
+  finalUrl: string;
+  pageTitle?: string | null;
+  textExcerpt?: string | null;
+  attachments: NoticePreviewAttachment[];
+  error?: string;
+}
+
