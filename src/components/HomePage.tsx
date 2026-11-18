@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Bell,
   Building2,
@@ -16,6 +16,7 @@ import {
   Code2,
 } from 'lucide-react';
 import { College, Notice } from '../types';
+import { sortNoticesByDateDesc } from '../lib/dateSort';
 
 interface HomePageProps {
   colleges: College[];
@@ -68,8 +69,11 @@ export const HomePage: React.FC<HomePageProps> = ({
     }
   };
 
+  // প্রকৃত তারিখ অনুযায়ী নতুন থেকে পুরোনো ক্রমে সাজানো
+  const sortedNotices = useMemo(() => sortNoticesByDateDesc(notices), [notices]);
+
   // নোটিশ ফিল্টার
-  const filteredNotices = notices.filter((notice) => {
+  const filteredNotices = sortedNotices.filter((notice) => {
     const matchesSearch =
       notice.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
       (notice.college_name && notice.college_name.toLowerCase().includes(searchTerm.toLowerCase()));
@@ -257,7 +261,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                         </span>
 
                         {notice.date && (
-                          <span className="text-[11px] text-slate-500 flex items-center space-x-1 font-medium shrink-0">
+                          <span className="text-[11px] text-slate-500 flex items-center space-x-1 font-medium shrink-0 tabular-nums">
                             <Calendar className="w-3 h-3 text-slate-400" />
                             <span>{notice.date}</span>
                           </span>

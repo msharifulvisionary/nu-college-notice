@@ -6,23 +6,28 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Run mode (normal or test)'
+        description: 'Run mode (normal, test, or baseline)'
         required: false
         default: 'normal'
         type: choice
         options:
           - normal
           - test
+          - baseline
       college_id:
-        description: 'College UUID (for test mode)'
+        description: 'College UUID (for test or baseline mode)'
         required: false
         default: ''
         type: string
       test_run_id:
-        description: 'Test run UUID (for test mode)'
+        description: 'Test or baseline run UUID'
         required: false
         default: ''
         type: string
+
+concurrency:
+  group: notice-scraper-${{ github.event.inputs.mode || 'normal' }}-${{ github.event.inputs.college_id || 'all' }}
+  cancel-in-progress: false
 
 jobs:
   scrape-and-notify:

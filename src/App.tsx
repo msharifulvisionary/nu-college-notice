@@ -7,7 +7,7 @@ import { CollegeList, CollegeTestUiState, ScanAllUiState } from './components/Co
 import { AddCollegeModal } from './components/AddCollegeModal';
 import { NoticeHistory } from './components/NoticeHistory';
 import { TelegramTester } from './components/TelegramTester';
-import { College, CollegePayload, Notice, SystemStatus } from './types';
+import { AutomationStatusResponse, College, CollegePayload, Notice, SystemStatus } from './types';
 import {
   isSupabaseConfigured,
   supabase,
@@ -29,7 +29,10 @@ import {
   sendAdminDailyDigest,
   triggerAdminScanAll,
   triggerAdminTestRun,
+  triggerAdminCollegeBaseline,
   fetchAdminTestRunStatus,
+  fetchAdminAutomation,
+  updateAdminAutomation,
 } from './lib/adminApi';
 import { Building2, Layers, Send, AlertTriangle, CheckCircle2 } from 'lucide-react';
 
@@ -73,6 +76,9 @@ export default function App() {
     run: null,
     error: null,
   });
+  const [automationStatus, setAutomationStatus] = useState<AutomationStatusResponse | null>(null);
+  const [isLoadingAutomation, setIsLoadingAutomation] = useState(false);
+  const [isTogglingAutomation, setIsTogglingAutomation] = useState(false);
 
   const activePollTimersRef = useRef<Record<string, number>>({});
   const scanAllTimerRef = useRef<number | null>(null);
@@ -208,6 +214,20 @@ export default function App() {
     }
   }, [isAdminLoggedIn, handleUnauthorized]);
 
+  // Load automation & cron status via authenticated Worker endpoint
+  const loadAutomationStatus = useCallback(async () => {
+    if (!isAdminLoggedIn) return;
+    setIsLoadingAutomation(true);
+    try {
+      const data = await fetchAdminAutomation(handleUnauthorized);
+      setAutomationStatus(data);
+    } catch {
+      // Non-fatal if settings row is not initialized yet
+    } finally {
+      setIsLoadingAutomation(false);
+    }
+  }, [isAdminLoggedIn, handleUnauthorized]);
+
   useEffect(() => {
     fetchPublicData();
   }, [fetchPublicData]);
@@ -215,15 +235,16 @@ export default function App() {
   useEffect(() => {
     if (currentView === 'admin' && isAdminLoggedIn) {
       loadAdminColleges();
+      loadAutomationStatus();
     }
-  }, [currentView, isAdminLoggedIn, loadAdminColleges]);
+  }, [currentView, isAdminLoggedIn, loadAdminColleges, loadAutomationStatus]);
 
   const handleRefreshAll = useCallback(async () => {
     await fetchPublicData();
     if (currentView === 'admin' && isAdminLoggedIn) {
-      await loadAdminColleges();
+      await Promise.all([loadAdminColleges(), loadAutomationStatus()]);
     }
-  }, [fetchPublicData, currentView, isAdminLoggedIn, loadAdminColleges]);
+  }, [fetchPublicData, currentView, isAdminLoggedIn, loadAdminColleges, loadAutomationStatus]);
 
   const handleLoginSuccess = () => {
     setAuthNotice(null);
@@ -286,6 +307,95 @@ export default function App() {
     }
   };
 
+  const handleToggleAutoScan = async () => {
+    if (!automationStatus) return;
+    const nextEnabled = !automationStatus.auto_scan_enabled;
+    setIsTogglingAutomation(true);
+    setActionBanner(null);
+    try {
+      const updated = await updateAdminAutomation(nextEnabled, handleUnauthorized);
+      setAutomationStatus(updated);
+      setActionBanner({
+        type: 'success',
+        text:
+          updated.message ||
+          (nextEnabled ? 'স্বয়ংক্রিয় ২০-মিনিট স্ক্যান চালু করা হয়েছে।' : 'স্বয়ংক্রিয় স্ক্যান বন্ধ করা হয়েছে।'),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'অটো স্ক্যান সেটিং পরিবর্তন করা যায়নি।';
+      setActionBanner({ type: 'error', text: msg });
+    } finally {
+      setIsTogglingAutomation(false);
+    }
+  };
+
+  // Shared Test / Baseline Run Polling Helper (3s polling, max 3 minutes)
+  const pollCollegeRun = useCallback(
+    (collegeId: string, runId: string, runMode: 'test' | 'baseline') => {
+      if (activePollTimersRef.current[collegeId]) {
+        window.clearTimeout(activePollTimersRef.current[collegeId]);
+        delete activePollTimersRef.current[collegeId];
+      }
+
+      setTestStates((prev) => ({
+        ...prev,
+        [collegeId]: { isRunning: true, mode: runMode, run: null, error: null },
+      }));
+
+      const startedAt = Date.now();
+      const maxDurationMs = 180000;
+
+      const pollStatus = async () => {
+        try {
+          const run = await fetchAdminTestRunStatus(runId, handleUnauthorized);
+
+          if (run.status === 'success' || run.status === 'error') {
+            setTestStates((prev) => ({
+              ...prev,
+              [collegeId]: { isRunning: false, mode: runMode, run, error: null },
+            }));
+            delete activePollTimersRef.current[collegeId];
+
+            if (runMode === 'baseline' && run.status === 'success') {
+              await Promise.all([fetchPublicData(), loadAdminColleges()]);
+            }
+            return;
+          }
+
+          if (Date.now() - startedAt >= maxDurationMs) {
+            setTestStates((prev) => ({
+              ...prev,
+              [collegeId]: {
+                isRunning: false,
+                mode: runMode,
+                run,
+                error:
+                  runMode === 'baseline'
+                    ? '৩ মিনিট পার হয়ে গেছে কিন্তু বেসলাইন সিঙ্ক এখনো চলছে। কিছুক্ষণ পর রিফ্রেশ করে দেখুন।'
+                    : '৩ মিনিট পার হয়ে গেছে কিন্তু টেস্ট রান শেষ হয়নি। অনুগ্রহ করে কিছুক্ষণ পর আবার টেস্ট করুন অথবা GitHub Actions লগ চেক করুন।',
+              },
+            }));
+            delete activePollTimersRef.current[collegeId];
+            return;
+          }
+
+          activePollTimersRef.current[collegeId] = window.setTimeout(pollStatus, 3000);
+        } catch (pollErr: unknown) {
+          const msg =
+            pollErr instanceof Error ? pollErr.message : 'রানের ফলাফল জানতে সমস্যা হয়েছে।';
+          setTestStates((prev) => ({
+            ...prev,
+            [collegeId]: { isRunning: false, mode: runMode, run: null, error: msg },
+          }));
+          delete activePollTimersRef.current[collegeId];
+        }
+      };
+
+      activePollTimersRef.current[collegeId] = window.setTimeout(pollStatus, 3000);
+    },
+    [handleUnauthorized, fetchPublicData, loadAdminColleges]
+  );
+
   const handleSaveCollege = async (payload: CollegePayload, collegeId?: string) => {
     setActionBanner(null);
     if (collegeId) {
@@ -296,10 +406,13 @@ export default function App() {
       const res = await createAdminCollege(payload, handleUnauthorized);
       setColleges((prev) => [res.college, ...prev]);
       setActionBanner({ type: 'success', text: res.message });
+      if (res.baseline_run_id) {
+        pollCollegeRun(res.college.id, res.baseline_run_id, 'baseline');
+      }
     }
   };
 
-  // Test Run Trigger + 3s Polling (max 3 minutes = 60 attempts)
+  // Test Run Trigger + 3s Polling
   const handleTestScrapeCollege = async (college: College) => {
     if (activePollTimersRef.current[college.id]) {
       window.clearTimeout(activePollTimersRef.current[college.id]);
@@ -308,60 +421,41 @@ export default function App() {
 
     setTestStates((prev) => ({
       ...prev,
-      [college.id]: { isRunning: true, run: null, error: null },
+      [college.id]: { isRunning: true, mode: 'test', run: null, error: null },
     }));
 
     try {
       const triggerRes = await triggerAdminTestRun(college.id, handleUnauthorized);
-      const testRunId = triggerRes.test_run_id;
-      const startedAt = Date.now();
-      const maxDurationMs = 180000;
-
-      const pollStatus = async () => {
-        try {
-          const run = await fetchAdminTestRunStatus(testRunId, handleUnauthorized);
-
-          if (run.status === 'success' || run.status === 'error') {
-            setTestStates((prev) => ({
-              ...prev,
-              [college.id]: { isRunning: false, run, error: null },
-            }));
-            delete activePollTimersRef.current[college.id];
-            return;
-          }
-
-          if (Date.now() - startedAt >= maxDurationMs) {
-            setTestStates((prev) => ({
-              ...prev,
-              [college.id]: {
-                isRunning: false,
-                run,
-                error:
-                  '৩ মিনিট পার হয়ে গেছে কিন্তু টেস্ট রান শেষ হয়নি। অনুগ্রহ করে কিছুক্ষণ পর আবার টেস্ট করুন অথবা GitHub Actions লগ চেক করুন।',
-              },
-            }));
-            delete activePollTimersRef.current[college.id];
-            return;
-          }
-
-          activePollTimersRef.current[college.id] = window.setTimeout(pollStatus, 3000);
-        } catch (pollErr: unknown) {
-          const msg =
-            pollErr instanceof Error ? pollErr.message : 'টেস্ট রানের ফলাফল জানতে সমস্যা হয়েছে।';
-          setTestStates((prev) => ({
-            ...prev,
-            [college.id]: { isRunning: false, run: null, error: msg },
-          }));
-          delete activePollTimersRef.current[college.id];
-        }
-      };
-
-      activePollTimersRef.current[college.id] = window.setTimeout(pollStatus, 3000);
+      pollCollegeRun(college.id, triggerRes.test_run_id, 'test');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'টেস্ট রান শুরু করতে সমস্যা হয়েছে।';
       setTestStates((prev) => ({
         ...prev,
-        [college.id]: { isRunning: false, run: null, error: msg },
+        [college.id]: { isRunning: false, mode: 'test', run: null, error: msg },
+      }));
+    }
+  };
+
+  // Manual 20-Notice Baseline Sync Trigger + 3s Polling
+  const handleSyncCollegeBaseline = async (college: College) => {
+    if (activePollTimersRef.current[college.id]) {
+      window.clearTimeout(activePollTimersRef.current[college.id]);
+      delete activePollTimersRef.current[college.id];
+    }
+
+    setTestStates((prev) => ({
+      ...prev,
+      [college.id]: { isRunning: true, mode: 'baseline', run: null, error: null },
+    }));
+
+    try {
+      const triggerRes = await triggerAdminCollegeBaseline(college.id, handleUnauthorized);
+      pollCollegeRun(college.id, triggerRes.test_run_id, 'baseline');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'বেসলাইন সিঙ্ক শুরু করতে সমস্যা হয়েছে।';
+      setTestStates((prev) => ({
+        ...prev,
+        [college.id]: { isRunning: false, mode: 'baseline', run: null, error: msg },
       }));
     }
   };
@@ -587,6 +681,10 @@ export default function App() {
             deletingId={deletingId}
             testStates={testStates}
             scanAllState={scanAllState}
+            automationStatus={automationStatus}
+            isLoadingAutomation={isLoadingAutomation}
+            isTogglingAutomation={isTogglingAutomation}
+            onToggleAutoScan={handleToggleAutoScan}
             onScanAllColleges={handleScanAllColleges}
             onToggleActive={handleToggleActive}
             onEditCollege={(college) => {
@@ -599,6 +697,7 @@ export default function App() {
               setIsCollegeModalOpen(true);
             }}
             onTestScrapeCollege={handleTestScrapeCollege}
+            onSyncCollegeBaseline={handleSyncCollegeBaseline}
           />
         )}
 

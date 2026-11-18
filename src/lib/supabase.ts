@@ -1,5 +1,6 @@
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 import { College, Notice } from '../types';
+import { sortNoticesByDateDesc } from './dateSort';
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim();
 const supabasePublishableKey = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim();
@@ -51,25 +52,39 @@ export async function fetchColleges(onlyActive = false): Promise<College[]> {
   return (data || []) as College[];
 }
 
-export async function fetchRecentNotices(limit = 100): Promise<Notice[]> {
+export async function fetchRecentNotices(limit = 200): Promise<Notice[]> {
   if (!supabase) {
     throw new Error('Supabase সেটিংস পাওয়া যায়নি, Cloudflare এর Build variables চেক করুন');
   }
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('notices')
     .select('*, colleges(name)')
+    .order('published_at', { ascending: false, nullsFirst: false })
     .order('created_at', { ascending: false })
     .limit(limit);
+
+  // যদি notices টেবিলে এখনো published_at কলাম যোগ না হয়ে থাকে, তবে created_at দিয়ে ফলব্যাক
+  if (error && error.message.toLowerCase().includes('published_at')) {
+    const fallback = await supabase
+      .from('notices')
+      .select('*, colleges(name)')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    data = fallback.data;
+    error = fallback.error;
+  }
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return (data || []).map((item: Notice & { colleges?: { name?: string } | null }) => ({
+  const mapped = (data || []).map((item: Notice & { colleges?: { name?: string } | null }) => ({
     ...item,
     college_name: item.colleges?.name || 'Govt. College',
   })) as Notice[];
+
+  return sortNoticesByDateDesc(mapped);
 }
 
 export async function getAdminSession(): Promise<Session | null> {

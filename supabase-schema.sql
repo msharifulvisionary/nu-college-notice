@@ -34,6 +34,7 @@ create table if not exists notices (
   title text not null,
   link text not null unique,
   date text,
+  published_at timestamptz,
   content_hash text not null,
   notified boolean default false,
   notified_at timestamptz,
@@ -41,9 +42,14 @@ create table if not exists notices (
   unique(college_id, content_hash)
 );
 
+-- পুরনো notices টেবিলে published_at কলাম যোগ করার নিরাপদ মাইগ্রেশন
+alter table public.notices
+  add column if not exists published_at timestamptz;
+
 -- Create indexes for performance
 create index if not exists idx_notices_college_hash on notices(college_id, content_hash);
 create index if not exists idx_notices_notified on notices(notified);
+create index if not exists idx_notices_published_at on notices(published_at desc nulls last, created_at desc);
 create index if not exists idx_colleges_active on colleges(is_active);
 
 -- Enable Row Level Security (RLS)

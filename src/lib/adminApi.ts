@@ -1,4 +1,5 @@
 import {
+  AutomationStatusResponse,
   College,
   CollegePayload,
   TelegramSettingsResponse,
@@ -84,13 +85,24 @@ export async function fetchAdminColleges(
 export async function createAdminCollege(
   payload: CollegePayload,
   onUnauthorized?: UnauthorizedHandler
-): Promise<{ college: College; message: string }> {
-  return adminRequest<{ college: College; message: string }>(
+): Promise<{ college: College; baseline_run_id?: string | null; message: string }> {
+  return adminRequest<{ college: College; baseline_run_id?: string | null; message: string }>(
     '/api/admin/colleges',
     {
       method: 'POST',
       body: JSON.stringify(payload),
     },
+    onUnauthorized
+  );
+}
+
+export async function triggerAdminCollegeBaseline(
+  collegeId: string,
+  onUnauthorized?: UnauthorizedHandler
+): Promise<{ test_run_id: string; status: string; message: string }> {
+  return adminRequest<{ test_run_id: string; status: string; message: string }>(
+    `/api/admin/colleges/${encodeURIComponent(collegeId)}/sync-baseline`,
+    { method: 'POST' },
     onUnauthorized
   );
 }
@@ -203,4 +215,28 @@ export async function fetchAdminTestRunStatus(
     onUnauthorized
   );
   return res.test_run;
+}
+
+export async function fetchAdminAutomation(
+  onUnauthorized?: UnauthorizedHandler
+): Promise<AutomationStatusResponse> {
+  return adminRequest<AutomationStatusResponse>(
+    '/api/admin/automation',
+    { method: 'GET' },
+    onUnauthorized
+  );
+}
+
+export async function updateAdminAutomation(
+  autoScanEnabled: boolean,
+  onUnauthorized?: UnauthorizedHandler
+): Promise<AutomationStatusResponse & { message?: string }> {
+  return adminRequest<AutomationStatusResponse & { message?: string }>(
+    '/api/admin/automation',
+    {
+      method: 'PUT',
+      body: JSON.stringify({ auto_scan_enabled: autoScanEnabled }),
+    },
+    onUnauthorized
+  );
 }

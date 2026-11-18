@@ -17,6 +17,7 @@ export interface Env {
   GITHUB_TOKEN?: string;
   GITHUB_REPO?: string; // ফরম্যাট: "owner/repo"
   GITHUB_BRANCH?: string; // অপশনাল (ডিফল্ট: "main")
+  CRON_SECRET?: string; // অপশনাল (external cron-job.org ওয়েবহুকের জন্য)
 }
 
 interface SelectorConfig {
@@ -433,10 +434,45 @@ async function handleCreateCollege(request: Request, env: Env): Promise<Response
     );
   }
 
+  const newCollege = res.data[0];
+
+  // নতুন কলেজ যোগ হওয়ার সাথে সাথেই সর্বশেষ ২০টি নোটিশ বেসলাইন হিসেবে সেভ করার জন্য ব্যাকগ্রাউন্ড রান চালু করা হচ্ছে
+  let baselineRunId: string | null = null;
+  const githubToken = (env.GITHUB_TOKEN || '').trim();
+  const githubRepo = normalizeGithubRepo(env.GITHUB_REPO);
+  if (githubToken && githubRepo) {
+    const createBaselineRes = await supabaseRest<TestRunRow[]>(env, 'test_runs', {
+      method: 'POST',
+      prefer: 'return=representation',
+      body: [
+        {
+          college_id: newCollege.id,
+          status: 'pending',
+          result: { mode: 'baseline' },
+        },
+      ],
+    });
+
+    if (createBaselineRes.ok && createBaselineRes.data && createBaselineRes.data.length > 0) {
+      baselineRunId = createBaselineRes.data[0].id;
+      const dispatchRes = await dispatchScraperWorkflow(env, baselineRunId, {
+        mode: 'baseline',
+        college_id: newCollege.id,
+        test_run_id: baselineRunId,
+      });
+      if (!dispatchRes.ok) {
+        baselineRunId = null;
+      }
+    }
+  }
+
   return jsonResponse(
     {
-      college: res.data[0],
-      message: 'নতুন কলেজ সফলভাবে যুক্ত হয়েছে।',
+      college: newCollege,
+      baseline_run_id: baselineRunId,
+      message: baselineRunId
+        ? 'নতুন কলেজ যুক্ত হয়েছে এবং সর্বশেষ ২০টি নোটিশ সংগ্রহ শুরু হয়েছে।'
+        : 'নতুন কলেজ সফলভাবে যুক্ত হয়েছে।',
     },
     201
   );
@@ -860,7 +896,7 @@ async function handleSendDailyDigest(env: Env): Promise<Response> {
 async function dispatchScraperWorkflow(
   env: Env,
   runId: string,
-  inputs: { mode: 'test' | 'normal'; college_id: string; test_run_id: string }
+  inputs: { mode: 'test' | 'normal' | 'baseline'; college_id: string; test_run_id: string }
 ): Promise<Response> {
   const githubToken = (env.GITHUB_TOKEN || '').trim();
   const githubRepo = normalizeGithubRepo(env.GITHUB_REPO);
@@ -1095,8 +1131,250 @@ async function handleGetTestRun(env: Env, id: string): Promise<Response> {
   return jsonResponse({ test_run: res.data[0] });
 }
 
+// নির্দিষ্ট কলেজের সর্বশেষ ২০টি নোটিশ ম্যানুয়ালি বেসলাইন সিঙ্ক করার হ্যান্ডলার
+async function handleTriggerCollegeBaseline(env: Env, collegeId: string): Promise<Response> {
+  if (!isValidUuid(collegeId)) {
+    return jsonResponse({ error: 'সঠিক কলেজ ID দেওয়া হয়নি।' }, 400);
+  }
+
+  const githubToken = (env.GITHUB_TOKEN || '').trim();
+  const githubRepo = normalizeGithubRepo(env.GITHUB_REPO);
+  if (!githubToken || !githubRepo) {
+    return jsonResponse(
+      { error: 'Worker-এ GITHUB_TOKEN বা GITHUB_REPO কনফিগার করা নেই।' },
+      500
+    );
+  }
+
+  const collegeRes = await supabaseRest<CollegeRecord[]>(
+    env,
+    `colleges?id=eq.${encodeURIComponent(collegeId)}&select=id,name`
+  );
+  if (!collegeRes.ok || !collegeRes.data || collegeRes.data.length === 0) {
+    return jsonResponse({ error: 'এই ID দিয়ে কোনো কলেজ খুঁজে পাওয়া যায়নি।' }, 404);
+  }
+
+  const createRunRes = await supabaseRest<TestRunRow[]>(env, 'test_runs', {
+    method: 'POST',
+    prefer: 'return=representation',
+    body: [
+      {
+        college_id: collegeId,
+        status: 'pending',
+        result: { mode: 'baseline' },
+      },
+    ],
+  });
+
+  if (!createRunRes.ok || !createRunRes.data || createRunRes.data.length === 0) {
+    return jsonResponse(
+      { error: `বেসলাইন সিঙ্ক রেকর্ড তৈরি করা যায়নি: ${createRunRes.errorMessage}` },
+      500
+    );
+  }
+
+  const run = createRunRes.data[0];
+  return dispatchScraperWorkflow(env, run.id, {
+    mode: 'baseline',
+    college_id: collegeId,
+    test_run_id: run.id,
+  });
+}
+
 // ============================================================================
-// মেইন Cloudflare Worker fetch হ্যান্ডলার
+// অটো-স্ক্যান ও ২০-মিনিট ক্রন শিডিউলার হ্যান্ডলারসমূহ
+// ============================================================================
+async function readAutomationStatus(env: Env): Promise<{
+  ok: boolean;
+  auto_scan_enabled: boolean;
+  interval_minutes: number;
+  last_auto_scan_at: string | null;
+  last_auto_scan_status: string | null;
+  last_auto_scan_message: string | null;
+  cron_webhook_configured: boolean;
+  errorMessage?: string;
+}> {
+  const res = await supabaseRest<SettingRow[]>(
+    env,
+    'settings?key=in.(auto_scan_enabled,last_auto_scan_at,last_auto_scan_status,last_auto_scan_message)&select=key,value'
+  );
+
+  if (!res.ok || !res.data) {
+    return {
+      ok: false,
+      auto_scan_enabled: true,
+      interval_minutes: 20,
+      last_auto_scan_at: null,
+      last_auto_scan_status: null,
+      last_auto_scan_message: null,
+      cron_webhook_configured: Boolean((env.CRON_SECRET || '').trim()),
+      errorMessage: res.errorMessage,
+    };
+  }
+
+  const map = new Map<string, string>();
+  for (const row of res.data) {
+    map.set(row.key, (row.value || '').trim());
+  }
+
+  const enabledVal = map.get('auto_scan_enabled');
+  return {
+    ok: true,
+    auto_scan_enabled: enabledVal ? enabledVal.toLowerCase() !== 'false' : true,
+    interval_minutes: 20,
+    last_auto_scan_at: map.get('last_auto_scan_at') || null,
+    last_auto_scan_status: map.get('last_auto_scan_status') || null,
+    last_auto_scan_message: map.get('last_auto_scan_message') || null,
+    cron_webhook_configured: Boolean((env.CRON_SECRET || '').trim()),
+  };
+}
+
+async function handleGetAutomation(env: Env): Promise<Response> {
+  const status = await readAutomationStatus(env);
+  if (!status.ok) {
+    return jsonResponse(
+      { error: `অটো-স্ক্যান তথ্য আনতে সমস্যা হয়েছে: ${status.errorMessage}` },
+      500
+    );
+  }
+  return jsonResponse({
+    auto_scan_enabled: status.auto_scan_enabled,
+    interval_minutes: status.interval_minutes,
+    last_auto_scan_at: status.last_auto_scan_at,
+    last_auto_scan_status: status.last_auto_scan_status,
+    last_auto_scan_message: status.last_auto_scan_message,
+    cron_webhook_configured: status.cron_webhook_configured,
+  });
+}
+
+async function handleUpdateAutomation(request: Request, env: Env): Promise<Response> {
+  const parsed = await parseJsonBody<{ auto_scan_enabled?: unknown }>(request);
+  if (parsed.errorResponse || !parsed.data) return parsed.errorResponse as Response;
+
+  if (typeof parsed.data.auto_scan_enabled !== 'boolean') {
+    return jsonResponse({ error: 'auto_scan_enabled মান অবশ্যই true বা false হতে হবে।' }, 400);
+  }
+
+  const nowIso = new Date().toISOString();
+  const upsertRes = await supabaseRest<SettingRow[]>(env, 'settings?on_conflict=key', {
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates,return=representation',
+    body: [
+      {
+        key: 'auto_scan_enabled',
+        value: parsed.data.auto_scan_enabled ? 'true' : 'false',
+        updated_at: nowIso,
+      },
+    ],
+  });
+
+  if (!upsertRes.ok) {
+    return jsonResponse(
+      { error: `অটো-স্ক্যান সেটিং আপডেট করা যায়নি: ${upsertRes.errorMessage}` },
+      500
+    );
+  }
+
+  const latest = await readAutomationStatus(env);
+  return jsonResponse({
+    auto_scan_enabled: latest.auto_scan_enabled,
+    interval_minutes: latest.interval_minutes,
+    last_auto_scan_at: latest.last_auto_scan_at,
+    last_auto_scan_status: latest.last_auto_scan_status,
+    last_auto_scan_message: latest.last_auto_scan_message,
+    cron_webhook_configured: latest.cron_webhook_configured,
+    message: parsed.data.auto_scan_enabled
+      ? 'প্রতি ২০ মিনিটে স্বয়ংক্রিয় স্ক্যান চালু করা হয়েছে।'
+      : 'স্বয়ংক্রিয় স্ক্যান সাময়িকভাবে বন্ধ করা হয়েছে।',
+  });
+}
+
+async function triggerScheduledAutoScan(
+  env: Env,
+  source: 'cloudflare_cron' | 'external_cron'
+): Promise<{ triggered: boolean; reason: string; runId?: string }> {
+  const automation = await readAutomationStatus(env);
+  if (!automation.auto_scan_enabled) {
+    return { triggered: false, reason: 'disabled' };
+  }
+
+  // সাম্প্রতিক ৮ মিনিটের ভেতর আরেকটি অটো-স্ক্যান চলে থাকলে ডুপ্লিকেট ট্রিগার এড়ানো হবে
+  if (automation.last_auto_scan_at) {
+    const lastMs = Date.parse(automation.last_auto_scan_at);
+    if (!Number.isNaN(lastMs) && Date.now() - lastMs < 8 * 60 * 1000) {
+      return { triggered: false, reason: 'too_recent' };
+    }
+  }
+
+  const githubToken = (env.GITHUB_TOKEN || '').trim();
+  const githubRepo = normalizeGithubRepo(env.GITHUB_REPO);
+  if (!githubToken || !githubRepo) {
+    const nowIso = new Date().toISOString();
+    await supabaseRest(env, 'settings?on_conflict=key', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates',
+      body: [
+        { key: 'last_auto_scan_at', value: nowIso, updated_at: nowIso },
+        { key: 'last_auto_scan_status', value: 'error', updated_at: nowIso },
+        {
+          key: 'last_auto_scan_message',
+          value: 'GITHUB_TOKEN বা GITHUB_REPO কনফিগার করা নেই।',
+          updated_at: nowIso,
+        },
+      ],
+    });
+    return { triggered: false, reason: 'missing_github_secrets' };
+  }
+
+  const createRunRes = await supabaseRest<TestRunRow[]>(env, 'test_runs', {
+    method: 'POST',
+    prefer: 'return=representation',
+    body: [
+      {
+        college_id: null,
+        status: 'pending',
+        result: { mode: 'normal', trigger: source },
+      },
+    ],
+  });
+
+  const runId = createRunRes.ok && createRunRes.data?.[0]?.id ? createRunRes.data[0].id : '';
+  const dispatchRes = await dispatchScraperWorkflow(env, runId, {
+    mode: 'normal',
+    college_id: '',
+    test_run_id: runId,
+  });
+
+  const nowIso = new Date().toISOString();
+  await supabaseRest(env, 'settings?on_conflict=key', {
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates',
+    body: [
+      { key: 'last_auto_scan_at', value: nowIso, updated_at: nowIso },
+      {
+        key: 'last_auto_scan_status',
+        value: dispatchRes.ok ? 'dispatched' : 'error',
+        updated_at: nowIso,
+      },
+      {
+        key: 'last_auto_scan_message',
+        value: dispatchRes.ok
+          ? `${source === 'cloudflare_cron' ? 'Cloudflare Cron' : 'Cron Webhook'} থেকে স্ক্যান শুরু হয়েছে`
+          : 'GitHub Actions ট্রিগার করতে ব্যর্থ হয়েছে',
+        updated_at: nowIso,
+      },
+    ],
+  });
+
+  return {
+    triggered: dispatchRes.ok,
+    reason: dispatchRes.ok ? 'dispatched' : 'dispatch_failed',
+    runId: runId || undefined,
+  };
+}
+
+// ============================================================================
+// মেইন Cloudflare Worker fetch ও scheduled (Cron) হ্যান্ডলার
 // ============================================================================
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -1105,6 +1383,24 @@ export default {
 
     // শুধুমাত্র /api/* রুটগুলো Worker নিজে হ্যান্ডেল করবে
     if (pathname.startsWith('/api/')) {
+      // অপশনাল External Cron Webhook (যেমন cron-job.org ব্যাকআপের জন্য)
+      if (pathname === '/api/cron/scan') {
+        if (request.method !== 'POST' && request.method !== 'GET') {
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+        const expectedSecret = (env.CRON_SECRET || '').trim();
+        if (!expectedSecret) {
+          return jsonResponse({ error: 'CRON_SECRET কনফিগার করা নেই।' }, 503);
+        }
+        const authHeader = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+        const querySecret = (url.searchParams.get('secret') || '').trim();
+        if (authHeader !== expectedSecret && querySecret !== expectedSecret) {
+          return jsonResponse({ error: 'অননুমোদিত Cron অনুরোধ।' }, 401);
+        }
+        const cronResult = await triggerScheduledAutoScan(env, 'external_cron');
+        return jsonResponse(cronResult, cronResult.triggered ? 202 : 200);
+      }
+
       // সব /api/admin/* রুটের জন্য এডমিন প্রমাণীকরণ বাধ্যতামূলক
       if (pathname.startsWith('/api/admin/')) {
         const auth = await verifyAdminRequest(request, env);
@@ -1117,7 +1413,15 @@ export default {
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 
-        // ২. নির্দিষ্ট কলেজ আপডেট (PATCH) বা ডিলিট (DELETE)
+        // ২. নির্দিষ্ট কলেজের ২০টি নোটিশ বেসলাইন সিঙ্ক করা
+        const baselineMatch = pathname.match(/^\/api\/admin\/colleges\/([^/]+)\/sync-baseline$/);
+        if (baselineMatch) {
+          const collegeId = decodeURIComponent(baselineMatch[1]);
+          if (request.method === 'POST') return handleTriggerCollegeBaseline(env, collegeId);
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+
+        // ৩. নির্দিষ্ট কলেজ আপডেট (PATCH) বা ডিলিট (DELETE)
         const collegeIdMatch = pathname.match(/^\/api\/admin\/colleges\/([^/]+)$/);
         if (collegeIdMatch) {
           const collegeId = decodeURIComponent(collegeIdMatch[1]);
@@ -1126,38 +1430,45 @@ export default {
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 
-        // ৩. টেলিগ্রাম সেটিংস পড়া ও সেভ করা
+        // ৪. টেলিগ্রাম সেটিংস পড়া ও সেভ করা
         if (pathname === '/api/admin/settings') {
           if (request.method === 'GET') return handleGetSettings(env);
           if (request.method === 'PUT') return handleUpdateSettings(request, env);
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 
-        // ৪. টেলিগ্রাম টেস্ট মেসেজ পাঠানো
+        // ৫. অটো-স্ক্যান ও ক্রন স্ট্যাটাস পড়া ও পরিবর্তন করা
+        if (pathname === '/api/admin/automation') {
+          if (request.method === 'GET') return handleGetAutomation(env);
+          if (request.method === 'PUT') return handleUpdateAutomation(request, env);
+          return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
+        }
+
+        // ৬. টেলিগ্রাম টেস্ট মেসেজ পাঠানো
         if (pathname === '/api/admin/telegram-test') {
           if (request.method === 'POST') return handleTelegramTest(request, env);
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 
-        // ৫. ডেইলি ডাইজেস্ট রিপোর্ট পাঠানো
+        // ৭. ডেইলি ডাইজেস্ট রিপোর্ট পাঠানো
         if (pathname === '/api/admin/daily-digest') {
           if (request.method === 'POST') return handleSendDailyDigest(env);
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 
-        // ৬. সব সক্রিয় কলেজ একসাথে এখনই স্ক্যান করা
+        // ৮. সব সক্রিয় কলেজ একসাথে এখনই স্ক্যান করা
         if (pathname === '/api/admin/scan-all') {
           if (request.method === 'POST') return handleTriggerScanAll(env);
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 
-        // ৭. নির্দিষ্ট কলেজের জন্য টেস্ট রান শুরু করা
+        // ৯. নির্দিষ্ট কলেজের জন্য টেস্ট রান শুরু করা
         if (pathname === '/api/admin/test-run') {
           if (request.method === 'POST') return handleTriggerTestRun(request, env);
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
 
-        // ৮. নির্দিষ্ট টেস্ট রানের ফলাফল পোল করা
+        // ১০. নির্দিষ্ট টেস্ট/বেসলাইন রানের ফলাফল পোল করা
         const testRunIdMatch = pathname.match(/^\/api\/admin\/test-run\/([^/]+)$/);
         if (testRunIdMatch) {
           const runId = decodeURIComponent(testRunIdMatch[1]);
@@ -1172,5 +1483,13 @@ export default {
 
     // বাকি সব রিকোয়েস্ট Static Assets (SPA) থেকে পরিবেশন করা হবে
     return env.ASSETS.fetch(request);
+  },
+
+  async scheduled(
+    _controller: { scheduledTime?: number; cron?: string },
+    env: Env,
+    ctx: { waitUntil(promise: Promise<unknown>): void }
+  ): Promise<void> {
+    ctx.waitUntil(triggerScheduledAutoScan(env, 'cloudflare_cron'));
   },
 };

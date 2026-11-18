@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Layers,
   Search,
@@ -18,6 +18,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { Notice, College } from '../types';
+import { sortNoticesByDateDesc } from '../lib/dateSort';
 
 interface NoticeHistoryProps {
   notices: Notice[];
@@ -68,8 +69,11 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
     'সাধারণ নোটিশ',
   ];
 
+  // প্রকৃত তারিখ অনুযায়ী নতুন থেকে পুরোনো ক্রমে সাজানো
+  const sortedNotices = useMemo(() => sortNoticesByDateDesc(notices), [notices]);
+
   // Filter notices
-  const filteredNotices = notices.filter((notice) => {
+  const filteredNotices = sortedNotices.filter((notice) => {
     const category = getNoticeCategory(notice.title);
 
     const matchesSearch =
@@ -217,7 +221,7 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
                       </span>
 
                       {notice.date && (
-                        <span className="text-[11px] text-slate-500 flex items-center space-x-1 font-medium">
+                        <span className="text-[11px] text-slate-500 flex items-center space-x-1 font-medium tabular-nums">
                           <Calendar className="w-3 h-3 text-slate-400" />
                           <span>{notice.date}</span>
                         </span>

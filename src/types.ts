@@ -42,6 +42,7 @@ export interface Notice {
   title: string;
   link: string;
   date?: string;
+  published_at?: string | null;
   content_hash: string;
   notified: boolean;
   notified_at?: string | null;
@@ -55,6 +56,15 @@ export interface TelegramSettingsResponse {
   message?: string;
 }
 
+export interface AutomationStatusResponse {
+  auto_scan_enabled: boolean;
+  interval_minutes: number;
+  last_auto_scan_at: string | null;
+  last_auto_scan_status: string | null;
+  last_auto_scan_message: string | null;
+  cron_webhook_configured: boolean;
+}
+
 export interface TestRunSampleNotice {
   title: string;
   date: string | null;
@@ -62,10 +72,11 @@ export interface TestRunSampleNotice {
 }
 
 export interface TestRunResult {
-  mode?: 'test' | 'normal';
+  mode?: 'test' | 'normal' | 'baseline';
   college_name?: string;
   notice_url?: string;
   parsed_count?: number;
+  saved_count?: number;
   sample?: TestRunSampleNotice[];
   total_colleges?: number;
   new_notices?: number;
