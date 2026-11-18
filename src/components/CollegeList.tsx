@@ -152,13 +152,6 @@ export const CollegeList: React.FC<CollegeListProps> = ({
                       )}
                     </button>
                   </div>
-
-                  {/* Selector badge */}
-                  <div className="mt-2.5">
-                    <span className="font-mono text-[10px] sm:text-[11px] text-slate-600 bg-slate-200/70 px-2 py-0.5 rounded inline-block truncate max-w-full">
-                      row: {college.selector_config?.row_selector || college.selector_config?.item || 'table tbody tr'}
-                    </span>
-                  </div>
                 </div>
 
                 {/* Action Toolbar */}

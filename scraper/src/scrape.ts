@@ -204,6 +204,36 @@ async function scrapeCollegeNotices(
       });
     });
 
+    // Fallback scan for non-standard layouts only if primary selector matched 0 notices
+    if (notices.length === 0) {
+      $('.notice-list .notice-item, .notice-item, ul.list-group li, table tr').each((_, el) => {
+        const $row = $(el);
+        const $link = $row.find('a[href]').first();
+        const rawHref = ($link.attr('href') || '').trim();
+        if (!rawHref || rawHref === '#' || rawHref.startsWith('javascript:')) return;
+
+        const title = ($link.text().trim() || $row.text().trim()).replace(/\s+/g, ' ').trim();
+        if (!title || title.length < 4) return;
+
+        let absoluteLink = rawHref;
+        try {
+          absoluteLink = new URL(absoluteLink, noticeUrl).href;
+        } catch {
+          // Keep raw href if URL resolution fails
+        }
+
+        if (seenLinks.has(absoluteLink)) return;
+        seenLinks.add(absoluteLink);
+
+        const dateText = $row.find('.date, time, td:first-child, td:nth-child(2)').first().text().replace(/\s+/g, ' ').trim();
+        notices.push({
+          title,
+          link: absoluteLink,
+          date: dateText && dateText !== title ? dateText : undefined,
+        });
+      });
+    }
+
     // Keep only the top 20 most recent notices for baseline/normal processing
     return {
       notices: notices.slice(0, 20),

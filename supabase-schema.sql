@@ -123,3 +123,6 @@ on conflict (id) do update set
   name = excluded.name,
   notice_url = excluded.notice_url,
   selector_config = excluded.selector_config;
+
+-- PostgREST schema cache রিলোড করার জন্য
+notify pgrst, 'reload schema';

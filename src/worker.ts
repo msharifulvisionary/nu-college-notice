@@ -339,7 +339,6 @@ async function handleCreateCollege(request: Request, env: Env): Promise<Response
 
   const name = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : '';
   const noticeUrl = typeof parsed.data.notice_url === 'string' ? parsed.data.notice_url.trim() : '';
-  const selectorConfig = parsed.data.selector_config;
   const isActive = typeof parsed.data.is_active === 'boolean' ? parsed.data.is_active : true;
 
   if (!name) {
@@ -355,9 +354,18 @@ async function handleCreateCollege(request: Request, env: Env): Promise<Response
     return jsonResponse({ error: 'সঠিক নোটিশ বোর্ড URL ফরম্যাট দিন।' }, 400);
   }
 
-  if (!selectorConfig || typeof selectorConfig !== 'object' || Array.isArray(selectorConfig)) {
-    return jsonResponse({ error: 'selector_config অবশ্যই একটি বৈধ JSON অবজেক্ট হতে হবে।' }, 400);
-  }
+  const rawSelectorConfig = parsed.data.selector_config;
+  const selectorConfig =
+    rawSelectorConfig &&
+    typeof rawSelectorConfig === 'object' &&
+    !Array.isArray(rawSelectorConfig)
+      ? rawSelectorConfig
+      : {
+          row_selector: 'table tbody tr',
+          date_selector: 'td:nth-child(2)',
+          title_selector: 'td:nth-child(3)',
+          link_selector: 'td:nth-child(4) a, a',
+        };
 
   const res = await supabaseRest<CollegeRecord[]>(env, 'colleges', {
     method: 'POST',
