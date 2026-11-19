@@ -169,20 +169,25 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
           <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
             <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-700">
               <MessageSquare className="w-3.5 h-3.5 text-sky-600" />
-              <span>আলাদা টেলিগ্রাম চ্যানেল / একাধিক গ্রুপ (ঐচ্ছিক)</span>
+              <span>টেলিগ্রাম গ্রুপ / সুপারগ্রুপ টপিক রাউটিং (ঐচ্ছিক)</span>
             </div>
-            <p className="text-[11px] text-slate-500 -mt-1">
-              ফাঁকা রাখলে ডিফল্ট চ্যাটে যাবে। একাধিক গ্রুপে পাঠাতে চাইলে কমা (,) দিয়ে Chat ID আলাদা করুন।
+            <p className="text-[11px] text-slate-500 -mt-1 leading-relaxed">
+              কাস্টম Chat ID ফাঁকা রেখে শুধু <strong>Topic ID</strong> দিলে নোটিশ{' '}
+              <strong>ডিফল্ট সুপারগ্রুপের ওই নির্দিষ্ট টপিকে</strong> যাবে। ভিন্ন গ্রুপ বা একাধিক টপিকে পাঠাতে কমা (,) দিয়ে{' '}
+              <code className="font-mono text-slate-700 bg-white px-1 rounded border border-slate-200">
+                ChatID#TopicID
+              </code>{' '}
+              লিখুন।
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                  কাস্টম Chat ID (কমা দিয়ে একাধিক)
+                  কাস্টম Chat ID (বা ChatID#TopicID)
                 </label>
                 <input
                   type="text"
-                  placeholder="-100123..., -100456..."
+                  placeholder="-100123... বা -100123...#42"
                   value={telegramChatId}
                   onChange={(e) => setTelegramChatId(e.target.value)}
                   className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-sky-500"
@@ -191,12 +196,12 @@ export const AddCollegeModal: React.FC<AddCollegeModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                  Topic / Thread ID (সুপারগ্রুপ)
+                  সুপারগ্রুপ Topic / Thread ID
                 </label>
                 <input
                   type="number"
                   min={1}
-                  placeholder="যেমন: 42"
+                  placeholder="যেমন: 42 (না থাকলে ফাঁকা)"
                   value={telegramThreadId}
                   onChange={(e) => setTelegramThreadId(e.target.value)}
                   className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-xs font-mono text-slate-800 focus:outline-none focus:border-sky-500"

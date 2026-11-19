@@ -148,16 +148,57 @@ function cleanOptionalChatId(raw: unknown): string | null {
   return trimmed || null;
 }
 
-// কমা বা নতুন লাইন দিয়ে আলাদা করা একাধিক Chat ID পার্স করার হেল্পার
-function parseWorkerChatIdList(raw: string | null | undefined): string[] {
+interface WorkerTelegramTarget {
+  chatId: string;
+  threadId?: number;
+}
+
+// কমা বা নতুন লাইন দিয়ে আলাদা করা Chat ID (এবং ঐচ্ছিক #topic বা :topic) পার্স করার হেল্পার
+function parseWorkerTelegramTargets(
+  raw: string | null | undefined,
+  fallbackThreadId?: number | null
+): WorkerTelegramTarget[] {
   if (!raw) return [];
   const seen = new Set<string>();
-  const list: string[] = [];
+  const targets: WorkerTelegramTarget[] = [];
+  const defaultThread =
+    typeof fallbackThreadId === 'number' && Number.isInteger(fallbackThreadId) && fallbackThreadId > 0
+      ? fallbackThreadId
+      : undefined;
+
   for (const part of raw.split(/[,\n]+/)) {
-    const clean = part.trim().replace(/^\./, '');
-    if (clean && !seen.has(clean)) {
-      seen.add(clean);
-      list.push(clean);
+    const trimmed = part.trim().replace(/^\./, '');
+    if (!trimmed) continue;
+
+    let chatId = trimmed;
+    let threadId = defaultThread;
+
+    const topicMatch = trimmed.match(/^(-?\d+|@[a-zA-Z0-9_]+)\s*[#:\/]\s*(\d+)$/);
+    if (topicMatch) {
+      chatId = topicMatch[1].trim();
+      const parsedTopic = Number(topicMatch[2]);
+      if (Number.isInteger(parsedTopic) && parsedTopic > 0) {
+        threadId = parsedTopic;
+      }
+    }
+
+    const dedupeKey = `${chatId}#${threadId || ''}`;
+    if (chatId && !seen.has(dedupeKey)) {
+      seen.add(dedupeKey);
+      targets.push({ chatId, ...(threadId ? { threadId } : {}) });
+    }
+  }
+  return targets;
+}
+
+// শুধু ইউনিক Chat ID তালিকা বের করার হেল্পার (Admin sender যাচাই ও সাবস্ক্রিপশনের জন্য)
+function parseWorkerChatIdList(raw: string | null | undefined): string[] {
+  const seen = new Set<string>();
+  const list: string[] = [];
+  for (const t of parseWorkerTelegramTargets(raw)) {
+    if (!seen.has(t.chatId)) {
+      seen.add(t.chatId);
+      list.push(t.chatId);
     }
   }
   return list;
@@ -331,11 +372,12 @@ async function fetchTelegramSettings(env: Env): Promise<{
   ok: boolean;
   botToken: string;
   chatId: string;
+  threadId: number | null;
   errorMessage?: string;
 }> {
   const res = await supabaseRest<SettingRow[]>(
     env,
-    'settings?key=in.(telegram_bot_token,telegram_chat_id)&select=key,value'
+    'settings?key=in.(telegram_bot_token,telegram_chat_id,telegram_thread_id)&select=key,value'
   );
 
   if (!res.ok || !res.data) {
@@ -343,19 +385,27 @@ async function fetchTelegramSettings(env: Env): Promise<{
       ok: false,
       botToken: '',
       chatId: '',
+      threadId: null,
       errorMessage: res.errorMessage || 'সেটিংস টেবিল থেকে তথ্য পড়া যায়নি।',
     };
   }
 
   let botToken = '';
   let chatId = '';
+  let threadId: number | null = null;
 
   for (const row of res.data) {
     if (row.key === 'telegram_bot_token') botToken = (row.value || '').trim();
     if (row.key === 'telegram_chat_id') chatId = (row.value || '').trim();
+    if (row.key === 'telegram_thread_id') {
+      const parsedNum = Number((row.value || '').trim());
+      if (Number.isInteger(parsedNum) && parsedNum > 0) {
+        threadId = parsedNum;
+      }
+    }
   }
 
-  return { ok: true, botToken, chatId };
+  return { ok: true, botToken, chatId, threadId };
 }
 
 // ============================================================================
@@ -635,6 +685,7 @@ async function handleGetSettings(env: Env): Promise<Response> {
     telegram_bot_token_masked: maskSecretToken(settings.botToken),
     has_telegram_bot_token: Boolean(settings.botToken),
     telegram_chat_id: settings.chatId,
+    telegram_thread_id: settings.threadId,
   });
 }
 
@@ -642,6 +693,7 @@ async function handleUpdateSettings(request: Request, env: Env): Promise<Respons
   const parsed = await parseJsonBody<{
     telegram_bot_token?: unknown;
     telegram_chat_id?: unknown;
+    telegram_thread_id?: unknown;
   }>(request);
   if (parsed.errorResponse || !parsed.data) return parsed.errorResponse as Response;
 
@@ -674,6 +726,21 @@ async function handleUpdateSettings(request: Request, env: Env): Promise<Respons
     });
   }
 
+  if (parsed.data.telegram_thread_id !== undefined) {
+    const parsedThread = parseOptionalThreadId(parsed.data.telegram_thread_id);
+    if (!parsedThread.valid) {
+      return jsonResponse(
+        { error: 'ডিফল্ট Topic / Thread ID অবশ্যই একটি ধনাত্মক পূর্ণসংখ্যা হতে হবে।' },
+        400
+      );
+    }
+    rowsToUpsert.push({
+      key: 'telegram_thread_id',
+      value: parsedThread.value ? String(parsedThread.value) : '',
+      updated_at: nowIso,
+    });
+  }
+
   if (rowsToUpsert.length === 0) {
     return jsonResponse({ error: 'সেভ করার জন্য অন্তত Chat ID বা নতুন Bot Token দিন।' }, 400);
   }
@@ -696,16 +763,36 @@ async function handleUpdateSettings(request: Request, env: Env): Promise<Respons
     telegram_bot_token_masked: maskSecretToken(latest.botToken),
     has_telegram_bot_token: Boolean(latest.botToken),
     telegram_chat_id: latest.chatId,
+    telegram_thread_id: latest.threadId,
     message: 'টেলিগ্রাম সেটিংস সফলভাবে ডাটাবেজে সংরক্ষণ করা হয়েছে।',
   });
 }
 
 async function handleTelegramTest(request: Request, env: Env): Promise<Response> {
   let customMessage = '';
+  let overrideChatId = '';
+  let overrideThreadId: number | null = null;
   try {
-    const body = (await request.json()) as { message?: unknown };
+    const body = (await request.json()) as {
+      message?: unknown;
+      chat_id?: unknown;
+      thread_id?: unknown;
+    };
     if (body && typeof body.message === 'string') {
       customMessage = body.message.trim();
+    }
+    if (body && typeof body.chat_id === 'string') {
+      overrideChatId = body.chat_id.trim();
+    }
+    if (body && body.thread_id !== undefined && body.thread_id !== null && body.thread_id !== '') {
+      const parsedThread = parseOptionalThreadId(body.thread_id);
+      if (!parsedThread.valid) {
+        return jsonResponse(
+          { ok: false, error: 'Topic / Thread ID অবশ্যই একটি ধনাত্মক পূর্ণসংখ্যা হতে হবে।' },
+          400
+        );
+      }
+      overrideThreadId = parsedThread.value;
     }
   } catch {
     // খালি বডি অনুমোদিত
@@ -716,21 +803,28 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
     return jsonResponse({ ok: false, error: settings.errorMessage }, 500);
   }
 
-  if (!settings.botToken || !settings.chatId) {
+  if (!settings.botToken) {
     return jsonResponse(
       {
         ok: false,
-        error:
-          'ডাটাবেজে Telegram Bot Token অথবা Chat ID সেভ করা নেই। অনুগ্রহ করে আগে সেটিংস সেভ করুন।',
+        error: 'ডাটাবেজে Telegram Bot Token সেভ করা নেই। অনুগ্রহ করে আগে টোকেন সেভ করুন।',
       },
       400
     );
   }
 
-  const chatIds = parseWorkerChatIdList(settings.chatId);
-  if (chatIds.length === 0) {
+  const rawTargetChat = overrideChatId || settings.chatId;
+  const fallbackThread =
+    overrideThreadId !== null
+      ? overrideThreadId
+      : overrideChatId
+        ? null
+        : settings.threadId;
+  const targets = parseWorkerTelegramTargets(rawTargetChat, fallbackThread);
+
+  if (targets.length === 0) {
     return jsonResponse(
-      { ok: false, error: 'সঠিক Telegram Chat ID পাওয়া যায়নি।' },
+      { ok: false, error: 'সঠিক Telegram Chat ID পাওয়া যায়নি। আগে সেটিংস সেভ করুন বা Chat ID দিন।' },
       400
     );
   }
@@ -743,16 +837,21 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
   let lastError = '';
   let lastTgData: { ok?: boolean; description?: string; error_code?: number } = {};
 
-  for (const cid of chatIds) {
+  for (const target of targets) {
     try {
+      const payload: Record<string, unknown> = {
+        chat_id: target.chatId,
+        text: textToSend,
+        disable_web_page_preview: false,
+      };
+      if (target.threadId) {
+        payload.message_thread_id = target.threadId;
+      }
+
       const tgRes = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: cid,
-          text: textToSend,
-          disable_web_page_preview: false,
-        }),
+        body: JSON.stringify(payload),
       });
 
       const tgData = (await tgRes.json().catch(() => ({}))) as {
@@ -767,7 +866,7 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
       } else {
         lastError =
           tgData.description ||
-          `টেলিগ্রাম মেসেজ পাঠানো যায়নি (HTTP ${tgRes.status})। টোকেন ও চ্যাট আইডি যাচাই করুন।`;
+          `টেলিগ্রাম মেসেজ পাঠানো যায়নি (HTTP ${tgRes.status})। টোকেন, চ্যাট ও টপিক আইডি যাচাই করুন।`;
       }
     } catch (err: unknown) {
       lastError = err instanceof Error ? err.message : String(err);
@@ -788,9 +887,11 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
   return jsonResponse({
     ok: true,
     message:
-      chatIds.length > 1
-        ? `টেলিগ্রাম টেস্ট মেসেজ ${sentCount}/${chatIds.length}টি চ্যাটে সফলভাবে পাঠানো হয়েছে!`
-        : 'টেলিগ্রাম টেস্ট মেসেজ সফলভাবে পাঠানো হয়েছে!',
+      targets.length > 1
+        ? `টেলিগ্রাম টেস্ট মেসেজ ${sentCount}/${targets.length}টি চ্যাট/টপিকে সফলভাবে পাঠানো হয়েছে!`
+        : targets[0].threadId
+          ? `টেলিগ্রাম টেস্ট মেসেজ সফলভাবে সুপারগ্রুপ টপিক #${targets[0].threadId}-এ পাঠানো হয়েছে!`
+          : 'টেলিগ্রাম টেস্ট মেসেজ সফলভাবে পাঠানো হয়েছে!',
     telegram_response: { ok: true },
   });
 }
@@ -896,24 +997,29 @@ async function handleSendDailyDigest(env: Env): Promise<Response> {
   }
 
   const digestText = digestData.text;
-  const chatIds = parseWorkerChatIdList(settings.chatId);
-  if (chatIds.length === 0) {
+  const targets = parseWorkerTelegramTargets(settings.chatId, settings.threadId);
+  if (targets.length === 0) {
     return jsonResponse({ ok: false, error: 'সঠিক Telegram Chat ID পাওয়া যায়নি।' }, 400);
   }
 
   let sentCount = 0;
   let lastError = '';
 
-  for (const cid of chatIds) {
+  for (const target of targets) {
     try {
+      const payload: Record<string, unknown> = {
+        chat_id: target.chatId,
+        text: digestText,
+        disable_web_page_preview: true,
+      };
+      if (target.threadId) {
+        payload.message_thread_id = target.threadId;
+      }
+
       const tgRes = await fetch(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: cid,
-          text: digestText,
-          disable_web_page_preview: true,
-        }),
+        body: JSON.stringify(payload),
       });
 
       const tgData = (await tgRes.json().catch(() => ({}))) as {
@@ -940,7 +1046,7 @@ async function handleSendDailyDigest(env: Env): Promise<Response> {
 
   return jsonResponse({
     ok: true,
-    message: `আজকের ডেইলি ডাইজেস্ট (${digestData.todayNoticesCount || 0} টি নোটিশ) সফলভাবে ${sentCount}টি টেলিগ্রাম চ্যাটে পাঠানো হয়েছে!`,
+    message: `আজকের ডেইলি ডাইজেস্ট (${digestData.todayNoticesCount || 0} টি নোটিশ) সফলভাবে ${sentCount}টি টেলিগ্রাম চ্যাট/টপিকে পাঠানো হয়েছে!`,
     summary: {
       date: digestData.dhakaDate,
       active_colleges: digestData.activeCollegesCount || 0,
@@ -993,22 +1099,17 @@ async function handleAdminBroadcast(request: Request, env: Env): Promise<Respons
     }
   }
 
-  const targetMap = new Map<string, { chatId: string; threadId?: number }>();
-  const addTarget = (cid: string, threadId?: number | null) => {
-    const clean = cid.trim().replace(/^\./, '');
-    if (!clean) return;
-    const key = `${clean}:${threadId && threadId > 0 ? threadId : ''}`;
+  const targetMap = new Map<string, WorkerTelegramTarget>();
+  const addTarget = (target: WorkerTelegramTarget) => {
+    const key = `${target.chatId}#${target.threadId || ''}`;
     if (!targetMap.has(key)) {
-      targetMap.set(key, {
-        chatId: clean,
-        ...(threadId && threadId > 0 ? { threadId } : {}),
-      });
+      targetMap.set(key, target);
     }
   };
 
   if (targetMode === 'custom') {
-    for (const cid of parseWorkerChatIdList(customChatIdsRaw)) {
-      addTarget(cid);
+    for (const t of parseWorkerTelegramTargets(customChatIdsRaw)) {
+      addTarget(t);
     }
     if (targetMap.size === 0) {
       return jsonResponse(
@@ -1017,8 +1118,8 @@ async function handleAdminBroadcast(request: Request, env: Env): Promise<Respons
       );
     }
   } else {
-    for (const cid of parseWorkerChatIdList(settings.chatId)) {
-      addTarget(cid);
+    for (const t of parseWorkerTelegramTargets(settings.chatId, settings.threadId)) {
+      addTarget(t);
     }
     if (targetMode === 'all') {
       const collegesRes = await supabaseRest<CollegeRecord[]>(
@@ -1027,10 +1128,15 @@ async function handleAdminBroadcast(request: Request, env: Env): Promise<Respons
       );
       if (collegesRes.ok && collegesRes.data) {
         for (const col of collegesRes.data) {
-          const customList = parseWorkerChatIdList(col.telegram_chat_id);
-          customList.forEach((cid, idx) => {
-            addTarget(cid, idx === 0 ? col.telegram_thread_id : undefined);
-          });
+          if (col.telegram_chat_id && col.telegram_chat_id.trim()) {
+            for (const t of parseWorkerTelegramTargets(col.telegram_chat_id, col.telegram_thread_id)) {
+              addTarget(t);
+            }
+          } else if (typeof col.telegram_thread_id === 'number' && col.telegram_thread_id > 0) {
+            for (const t of parseWorkerTelegramTargets(settings.chatId, col.telegram_thread_id)) {
+              addTarget(t);
+            }
+          }
         }
       }
     }
@@ -3225,91 +3331,128 @@ function extractAttachmentsAndTextFromHtml(
   };
 
   // ১. Anchor ট্যাগ (<a href="...">)
-  const anchorRegex = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
-  let aMatch: RegExpExecArray | null;
-  while ((aMatch = anchorRegex.exec(scanScope)) !== null) {
-    const attrs = aMatch[1] || '';
-    const innerText = (aMatch[2] || '').replace(/<[^>]+>/g, ' ').trim();
-    const href = extractHtmlAttribute(`<a ${attrs}>`, 'href');
-    if (!href) continue;
+  const scanTagsInScope = (scopeHtml: string) => {
+    const anchorRegex = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+    let aMatch: RegExpExecArray | null;
+    while ((aMatch = anchorRegex.exec(scopeHtml)) !== null) {
+      const attrs = aMatch[1] || '';
+      const innerText = (aMatch[2] || '').replace(/<[^>]+>/g, ' ').trim();
+      const href = extractHtmlAttribute(`<a ${attrs}>`, 'href');
+      if (!href) continue;
 
-    const hasDownloadHint =
-      /\bdownload\b/i.test(attrs) ||
-      /ডাউনলোড|download|pdf|পিডিএফ|view\s*notice|attachment/i.test(innerText) ||
-      looksLikePdfLink(href) ||
-      looksLikeImageLink(href) ||
-      href.toLowerCase().includes('drive.google.com');
+      const hasDownloadHint =
+        /\bdownload\b/i.test(attrs) ||
+        /ডাউনলোড|download|pdf|পিডিএফ|view\s*notice|attachment/i.test(innerText) ||
+        looksLikePdfLink(href) ||
+        looksLikeImageLink(href) ||
+        href.toLowerCase().includes('drive.google.com');
 
-    if (hasDownloadHint) {
-      pushUrl(href, looksLikeImageLink(href) ? 'image' : looksLikePdfLink(href) || href.toLowerCase().includes('drive.google.com') ? 'pdf' : undefined);
+      if (hasDownloadHint) {
+        pushUrl(
+          href,
+          looksLikeImageLink(href)
+            ? 'image'
+            : looksLikePdfLink(href) || href.toLowerCase().includes('drive.google.com')
+              ? 'pdf'
+              : undefined
+        );
+      }
     }
+
+    // ২. iframe / embed / object ট্যাগ
+    const embedRegex = /<(iframe|embed|object)\b([^>]*)>/gi;
+    let eMatch: RegExpExecArray | null;
+    while ((eMatch = embedRegex.exec(scopeHtml)) !== null) {
+      const fullTag = eMatch[0];
+      const src =
+        extractHtmlAttribute(fullTag, 'src') ||
+        extractHtmlAttribute(fullTag, 'data');
+      if (!src) continue;
+      const normalizedSrc = src.toLowerCase();
+      if (
+        normalizedSrc.includes('.pdf') ||
+        normalizedSrc.includes('drive.google.com') ||
+        normalizedSrc.includes('docs.google.com') ||
+        normalizedSrc.includes('pdfjs') ||
+        normalizedSrc.includes('viewer')
+      ) {
+        pushUrl(src, 'pdf');
+      }
+    }
+
+    // ৩. Img ট্যাগ (স্ক্যান করা নোটিশ ছবি খুঁজতে — লোগো/আইকন/ছোট ছবি বাদ দিয়ে)
+    const imgRegex = /<img\b([^>]*)>/gi;
+    let iMatch: RegExpExecArray | null;
+    while ((iMatch = imgRegex.exec(scopeHtml)) !== null) {
+      const fullTag = iMatch[0];
+      const src =
+        extractHtmlAttribute(fullTag, 'data-src') ||
+        extractHtmlAttribute(fullTag, 'data-lazy-src') ||
+        extractHtmlAttribute(fullTag, 'src');
+      if (!src || src.startsWith('data:image/svg')) continue;
+
+      const lowerSrc = src.toLowerCase();
+      const alt = extractHtmlAttribute(fullTag, 'alt').toLowerCase();
+      const cls = extractHtmlAttribute(fullTag, 'class').toLowerCase();
+      const widthNum = Number(extractHtmlAttribute(fullTag, 'width') || 0);
+      const heightNum = Number(extractHtmlAttribute(fullTag, 'height') || 0);
+
+      if ((widthNum > 0 && widthNum < 90) || (heightNum > 0 && heightNum < 90)) continue;
+      if (
+        lowerSrc.includes('logo') ||
+        lowerSrc.includes('icon') ||
+        lowerSrc.includes('favicon') ||
+        lowerSrc.includes('avatar') ||
+        lowerSrc.includes('spinner') ||
+        lowerSrc.includes('loading') ||
+        lowerSrc.includes('emoji') ||
+        lowerSrc.includes('flag') ||
+        lowerSrc.endsWith('.svg') ||
+        alt.includes('logo') ||
+        cls.includes('logo') ||
+        cls.includes('avatar')
+      ) {
+        continue;
+      }
+
+      let resolvedImg = '';
+      try {
+        resolvedImg = normalizePreviewMediaUrl(new URL(decodeBasicHtmlEntities(src), baseUrl).href);
+      } catch {
+        continue;
+      }
+      if (!isSafeExternalHttpUrl(resolvedImg) || seenUrls.has(resolvedImg)) continue;
+      seenUrls.add(resolvedImg);
+      imageCandidates.push(makePreviewAttachmentObject('image', resolvedImg, fallbackTitle));
+    }
+  };
+
+  scanTagsInScope(scanScope);
+  if (pdfCandidates.length === 0 && imageCandidates.length === 0 && scanScope !== cleanHtml) {
+    scanTagsInScope(cleanHtml);
   }
 
-  // ২. iframe / embed / object ট্যাগ
-  const embedRegex = /<(iframe|embed|object)\b([^>]*)>/gi;
-  let eMatch: RegExpExecArray | null;
-  while ((eMatch = embedRegex.exec(scanScope)) !== null) {
-    const fullTag = eMatch[0];
-    const src =
-      extractHtmlAttribute(fullTag, 'src') ||
-      extractHtmlAttribute(fullTag, 'data');
-    if (!src) continue;
-    const normalizedSrc = src.toLowerCase();
-    if (
-      normalizedSrc.includes('.pdf') ||
-      normalizedSrc.includes('drive.google.com') ||
-      normalizedSrc.includes('docs.google.com') ||
-      normalizedSrc.includes('pdfjs') ||
-      normalizedSrc.includes('viewer')
-    ) {
-      pushUrl(src, 'pdf');
+  // ৩খ. Next.js / React SSR JSON বা inline স্ক্রিপ্ট থেকে PDF / ছবির URL খোঁজার ফলব্যাক
+  if (pdfCandidates.length === 0 && imageCandidates.length === 0) {
+    const rawMediaUrlRegex =
+      /(?:https?:\/\/|\/)[^\s"'<>\\)]+?\.(?:pdf|jpe?g|png|webp)(?:\?[^\s"'<>\\)]*)?/gi;
+    let rMatch: RegExpExecArray | null;
+    while ((rMatch = rawMediaUrlRegex.exec(html)) !== null) {
+      const candidate = rMatch[0];
+      const lower = candidate.toLowerCase();
+      if (
+        lower.includes('logo') ||
+        lower.includes('favicon') ||
+        lower.includes('icon') ||
+        lower.includes('avatar') ||
+        lower.includes('/_next/static/') ||
+        lower.includes('/assets/')
+      ) {
+        continue;
+      }
+      pushUrl(candidate);
+      if (pdfCandidates.length + imageCandidates.length >= 6) break;
     }
-  }
-
-  // ৩. Img ট্যাগ (স্ক্যান করা নোটিশ ছবি খুঁজতে — লোগো/আইকন/ছোট ছবি বাদ দিয়ে)
-  const imgRegex = /<img\b([^>]*)>/gi;
-  let iMatch: RegExpExecArray | null;
-  while ((iMatch = imgRegex.exec(scanScope)) !== null) {
-    const fullTag = iMatch[0];
-    const src =
-      extractHtmlAttribute(fullTag, 'data-src') ||
-      extractHtmlAttribute(fullTag, 'data-lazy-src') ||
-      extractHtmlAttribute(fullTag, 'src');
-    if (!src || src.startsWith('data:image/svg')) continue;
-
-    const lowerSrc = src.toLowerCase();
-    const alt = extractHtmlAttribute(fullTag, 'alt').toLowerCase();
-    const cls = extractHtmlAttribute(fullTag, 'class').toLowerCase();
-    const widthNum = Number(extractHtmlAttribute(fullTag, 'width') || 0);
-    const heightNum = Number(extractHtmlAttribute(fullTag, 'height') || 0);
-
-    if ((widthNum > 0 && widthNum < 90) || (heightNum > 0 && heightNum < 90)) continue;
-    if (
-      lowerSrc.includes('logo') ||
-      lowerSrc.includes('icon') ||
-      lowerSrc.includes('favicon') ||
-      lowerSrc.includes('avatar') ||
-      lowerSrc.includes('spinner') ||
-      lowerSrc.includes('loading') ||
-      lowerSrc.includes('emoji') ||
-      lowerSrc.includes('flag') ||
-      lowerSrc.endsWith('.svg') ||
-      alt.includes('logo') ||
-      cls.includes('logo') ||
-      cls.includes('avatar')
-    ) {
-      continue;
-    }
-
-    let resolvedImg = '';
-    try {
-      resolvedImg = normalizePreviewMediaUrl(new URL(decodeBasicHtmlEntities(src), baseUrl).href);
-    } catch {
-      continue;
-    }
-    if (!isSafeExternalHttpUrl(resolvedImg) || seenUrls.has(resolvedImg)) continue;
-    seenUrls.add(resolvedImg);
-    imageCandidates.push(makePreviewAttachmentObject('image', resolvedImg, fallbackTitle));
   }
 
   // ৪. পরিষ্কার টেক্সট সারসংক্ষেপ (যদি HTML নোটিশ হয়)
@@ -3333,7 +3476,8 @@ function extractAttachmentsAndTextFromHtml(
 
 async function fetchWithPreviewHeaders(
   targetUrl: string,
-  timeoutMs = 13000
+  timeoutMs = 13000,
+  options?: { userAgentIndex?: number; omitReferer?: boolean }
 ): Promise<Response> {
   let originHeader = '';
   try {
@@ -3342,6 +3486,7 @@ async function fetchWithPreviewHeaders(
     originHeader = '';
   }
 
+  const uaIdx = (options?.userAgentIndex || 0) % PREVIEW_USER_AGENTS.length;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -3349,10 +3494,10 @@ async function fetchWithPreviewHeaders(
       method: 'GET',
       redirect: 'follow',
       headers: {
-        'User-Agent': PREVIEW_USER_AGENTS[0],
+        'User-Agent': PREVIEW_USER_AGENTS[uaIdx],
         Accept: 'text/html,application/pdf,image/*,*/*;q=0.8',
         'Accept-Language': 'bn-BD,bn;q=0.9,en-US;q=0.8,en;q=0.7',
-        ...(originHeader ? { Referer: originHeader } : {}),
+        ...(!options?.omitReferer && originHeader ? { Referer: originHeader } : {}),
       },
       signal: controller.signal,
     });
@@ -3361,7 +3506,88 @@ async function fetchWithPreviewHeaders(
   }
 }
 
-async function handleNoticePreview(request: Request): Promise<Response> {
+function buildWorkerProxyTargetUrl(proxyTemplate: string, targetUrl: string): string {
+  const trimmed = proxyTemplate.trim();
+  if (!trimmed) return targetUrl;
+  if (trimmed.includes('{url}')) {
+    return trimmed.replace(/\{url\}/g, encodeURIComponent(targetUrl));
+  }
+  if (trimmed.endsWith('=') || trimmed.endsWith('?')) {
+    return `${trimmed}${encodeURIComponent(targetUrl)}`;
+  }
+  return `${trimmed.replace(/\/+$/, '')}/${targetUrl}`;
+}
+
+function looksLikeWorkerSpaHtml(html: string): boolean {
+  const lower = html.toLowerCase();
+  const hasMount =
+    lower.includes('id="root"') ||
+    lower.includes("id='root'") ||
+    lower.includes('id="app"') ||
+    lower.includes('id="__next"') ||
+    lower.includes('id="__nuxt"');
+  const hasModule = lower.includes('type="module"') || lower.includes("type='module'");
+  return hasMount || hasModule;
+}
+
+interface CachedNoticeAttachmentRecord {
+  attachments?: Array<{ kind: 'pdf' | 'image'; url: string; filename?: string }>;
+  textExcerpt?: string | null;
+  pageTitle?: string | null;
+}
+
+async function readCachedNoticePreview(
+  env: Env,
+  rawUrl: string,
+  normalizedUrl: string,
+  noticeTitle: string
+): Promise<{
+  attachments: PreviewAttachmentCandidate[];
+  textExcerpt: string | null;
+  pageTitle: string | null;
+} | null> {
+  try {
+    const cacheRes = await supabaseRest<SettingRow[]>(
+      env,
+      'settings?key=eq.notice_attachments_cache&select=key,value'
+    );
+    if (!cacheRes.ok || !cacheRes.data?.[0]?.value) return null;
+    const parsedMap = JSON.parse(cacheRes.data[0].value) as Record<
+      string,
+      CachedNoticeAttachmentRecord
+    >;
+    if (!parsedMap || typeof parsedMap !== 'object') return null;
+
+    const entry = parsedMap[rawUrl] || parsedMap[normalizedUrl];
+    if (!entry) return null;
+
+    const rawList = Array.isArray(entry.attachments) ? entry.attachments : [];
+    const attachments: PreviewAttachmentCandidate[] = [];
+    for (const item of rawList) {
+      if (!item?.url || !isSafeExternalHttpUrl(item.url)) continue;
+      const cleanMediaUrl = normalizePreviewMediaUrl(item.url);
+      attachments.push(
+        makePreviewAttachmentObject(
+          item.kind === 'image' ? 'image' : 'pdf',
+          cleanMediaUrl,
+          noticeTitle
+        )
+      );
+    }
+
+    if (attachments.length === 0 && !entry.textExcerpt) return null;
+
+    return {
+      attachments,
+      textExcerpt: entry.textExcerpt || null,
+      pageTitle: entry.pageTitle || noticeTitle,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function handleNoticePreview(request: Request, env: Env): Promise<Response> {
   const reqUrl = new URL(request.url);
   const rawNoticeUrl = (reqUrl.searchParams.get('url') || '').trim();
   const noticeTitle = (reqUrl.searchParams.get('title') || 'college_notice').trim();
@@ -3371,6 +3597,28 @@ async function handleNoticePreview(request: Request): Promise<Response> {
   }
 
   const normalizedUrl = normalizePreviewMediaUrl(rawNoticeUrl);
+
+  // ০. স্ক্র্যাপার থেকে সংরক্ষিত ক্যাশ (বিশেষ করে SPA / Playwright নোটিশের জন্য)
+  const cachedPreview = await readCachedNoticePreview(env, rawNoticeUrl, normalizedUrl, noticeTitle);
+  if (cachedPreview && cachedPreview.attachments.length > 0) {
+    return new Response(
+      JSON.stringify({
+        kind: cachedPreview.attachments[0].kind,
+        originalUrl: rawNoticeUrl,
+        finalUrl: normalizedUrl,
+        pageTitle: cachedPreview.pageTitle,
+        textExcerpt: cachedPreview.textExcerpt,
+        attachments: cachedPreview.attachments,
+      }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'public, max-age=180',
+        },
+      }
+    );
+  }
 
   // সরাসরি PDF বা ছবি URL হলে নেটওয়ার্ক অপেক্ষা ছাড়াই ফাস্ট রেসপন্স
   if (looksLikePdfLink(normalizedUrl)) {
@@ -3416,11 +3664,114 @@ async function handleNoticePreview(request: Request): Promise<Response> {
   }
 
   try {
-    const res = await fetchWithPreviewHeaders(normalizedUrl, 13000);
+    let res = await fetchWithPreviewHeaders(normalizedUrl, 12000);
+
+    // যদি 403 বা 404 আসে, তাহলে encodeURI / Referer ছাড়া / ট্রেইলিং স্ল্যাশ রিট্রাই করা হবে
+    if (!res.ok && (res.status === 404 || res.status === 403 || res.status === 406)) {
+      const candidatesToTry: string[] = [];
+      const encoded = encodeURI(normalizedUrl);
+      if (encoded !== normalizedUrl) candidatesToTry.push(encoded);
+      if (!normalizedUrl.endsWith('/')) {
+        candidatesToTry.push(`${normalizedUrl}/`);
+      } else if (normalizedUrl.length > 10) {
+        candidatesToTry.push(normalizedUrl.slice(0, -1));
+      }
+
+      // একবার Referer ছাড়া মোবাইল UA দিয়ে চেষ্টা
+      const noRefRes = await fetchWithPreviewHeaders(normalizedUrl, 10000, {
+        userAgentIndex: 1,
+        omitReferer: true,
+      }).catch(() => null);
+      if (noRefRes && noRefRes.ok) {
+        res = noRefRes;
+      } else {
+        for (const altUrl of candidatesToTry) {
+          if (!isSafeExternalHttpUrl(altUrl)) continue;
+          const altRes = await fetchWithPreviewHeaders(altUrl, 10000, {
+            userAgentIndex: 1,
+            omitReferer: true,
+          }).catch(() => null);
+          if (altRes && altRes.ok) {
+            res = altRes;
+            break;
+          }
+        }
+      }
+    }
+
+    // সংশ্লিষ্ট কলেজের কাস্টম proxy_url থাকলে তা দিয়ে চেষ্টা
+    if (!res.ok) {
+      const origin = new URL(normalizedUrl).origin;
+      const colRes = await supabaseRest<CollegeRecord[]>(
+        env,
+        `colleges?select=notice_url,selector_config`
+      );
+      if (colRes.ok && colRes.data) {
+        const matchedCollege = colRes.data.find((c) => {
+          try {
+            return new URL(c.notice_url).origin === origin;
+          } catch {
+            return false;
+          }
+        });
+        const proxyTpl =
+          typeof matchedCollege?.selector_config?.proxy_url === 'string'
+            ? matchedCollege.selector_config.proxy_url.trim()
+            : '';
+        if (proxyTpl) {
+          const proxiedUrl = buildWorkerProxyTargetUrl(proxyTpl, normalizedUrl);
+          if (isSafeExternalHttpUrl(proxiedUrl)) {
+            const pRes = await fetchWithPreviewHeaders(proxiedUrl, 12000).catch(() => null);
+            if (pRes && pRes.ok) {
+              res = pRes;
+            }
+          }
+        }
+      }
+    }
+
     const finalUrl = res.url || normalizedUrl;
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
 
     if (!res.ok) {
+      // যদি ক্যাশে শুধু textExcerpt থাকে সেটি দেখাবে
+      if (cachedPreview?.textExcerpt) {
+        return jsonResponse({
+          kind: 'webpage',
+          originalUrl: rawNoticeUrl,
+          finalUrl,
+          pageTitle: cachedPreview.pageTitle || noticeTitle,
+          textExcerpt: cachedPreview.textExcerpt,
+          attachments: [],
+        });
+      }
+
+      // যদি 404 সাবপাথ হয় এবং মূল সাইট একটি React/JS SPA হয়, তাহলে পরিষ্কার SPA বার্তা দেবে
+      if (res.status === 404) {
+        const parsedTarget = new URL(normalizedUrl);
+        if (parsedTarget.pathname && parsedTarget.pathname !== '/') {
+          const originRes = await fetchWithPreviewHeaders(`${parsedTarget.origin}/`, 8000).catch(
+            () => null
+          );
+          if (originRes && originRes.ok) {
+            const originHtml = await originRes.text().catch(() => '');
+            if (looksLikeWorkerSpaHtml(originHtml)) {
+              return jsonResponse({
+                kind: 'webpage',
+                isSpaSite: true,
+                originalUrl: rawNoticeUrl,
+                finalUrl,
+                pageTitle: noticeTitle,
+                textExcerpt: null,
+                attachments: [],
+                error:
+                  'এই কলেজের নোটিশ পেইজটি একটি JavaScript (SPA) ওয়েবসাইটে তৈরি, তাই সরাসরি রুট ছাড়া সাব-লিংক থেকে ফাইল টানা যায়নি। এডমিন প্যানেল থেকে "সিঙ্ক (২০টি)" বা স্ক্যান চালালে এটি ক্যাশ হয়ে প্রিভিউ দেখাবে, অথবা নিচের বাটন থেকে মূল সাইট দেখতে পারেন।',
+              });
+            }
+          }
+        }
+      }
+
       return jsonResponse(
         {
           kind: 'webpage',
@@ -3429,7 +3780,7 @@ async function handleNoticePreview(request: Request): Promise<Response> {
           pageTitle: noticeTitle,
           textExcerpt: null,
           attachments: [],
-          error: `কলেজ সার্ভার থেকে রেসপন্স আসেনি (HTTP ${res.status})।`,
+          error: `কলেজ সার্ভার থেকে ফাইল পাওয়া যায়নি (HTTP ${res.status})। নিচের বাটন থেকে মূল নোটিশ ওয়েবসাইটে দেখতে পারেন।`,
         },
         200
       );
@@ -3479,17 +3830,25 @@ async function handleNoticePreview(request: Request): Promise<Response> {
 
     const html = await res.text();
     const extracted = extractAttachmentsAndTextFromHtml(html, finalUrl, noticeTitle);
+    const isSpa = extracted.attachments.length === 0 && looksLikeWorkerSpaHtml(html);
     const detectedKind: 'pdf' | 'image' | 'webpage' =
       extracted.attachments.length > 0 ? extracted.attachments[0].kind : 'webpage';
 
     return new Response(
       JSON.stringify({
         kind: detectedKind,
+        isSpaSite: isSpa,
         originalUrl: rawNoticeUrl,
         finalUrl,
         pageTitle: extracted.pageTitle || noticeTitle,
-        textExcerpt: extracted.textExcerpt,
+        textExcerpt: extracted.textExcerpt || cachedPreview?.textExcerpt || null,
         attachments: extracted.attachments,
+        ...(isSpa && !extracted.textExcerpt
+          ? {
+              error:
+                'এই নোটিশ পেইজটি JavaScript (SPA) নির্ভর হওয়ায় ব্রাউজার রেন্ডারিং ছাড়া ভেতরের ফাইল দেখা যাচ্ছে না। এডমিন প্যানেল থেকে "সিঙ্ক (২০টি)" বা স্ক্যান চালালে এটি স্বয়ংক্রিয়ভাবে সংরক্ষিত হবে।',
+            }
+          : {}),
       }),
       {
         status: 200,
@@ -3666,7 +4025,7 @@ export default {
         if (request.method !== 'GET') {
           return jsonResponse({ error: 'এই HTTP মেথড অনুমোদিত নয়।' }, 405);
         }
-        return handleNoticePreview(request);
+        return handleNoticePreview(request, env);
       }
 
       // পাবলিক ও এডমিন মিডিয়া প্রক্সি (ফোনে ইনলাইন প্রিভিউ ও সরাসরি ডাউনলোড)

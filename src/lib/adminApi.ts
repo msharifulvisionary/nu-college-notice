@@ -148,7 +148,11 @@ export async function fetchAdminSettings(
 }
 
 export async function saveAdminSettings(
-  payload: { telegram_bot_token?: string; telegram_chat_id: string },
+  payload: {
+    telegram_bot_token?: string;
+    telegram_chat_id: string;
+    telegram_thread_id?: number | null;
+  },
   onUnauthorized?: UnauthorizedHandler
 ): Promise<TelegramSettingsResponse> {
   return adminRequest<TelegramSettingsResponse>(
@@ -162,14 +166,24 @@ export async function saveAdminSettings(
 }
 
 export async function sendAdminTelegramTest(
-  message: string | undefined,
+  payload?:
+    | string
+    | {
+        message?: string;
+        chat_id?: string;
+        thread_id?: number | null;
+      },
   onUnauthorized?: UnauthorizedHandler
 ): Promise<{ ok: boolean; message?: string; error?: string }> {
+  const body =
+    typeof payload === 'string'
+      ? { message: payload }
+      : payload || {};
   return adminRequest<{ ok: boolean; message?: string; error?: string }>(
     '/api/admin/telegram-test',
     {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify(body),
     },
     onUnauthorized
   );

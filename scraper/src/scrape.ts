@@ -90,6 +90,7 @@ interface UpcomingDeadlineEntry {
 interface TelegramRuntimeConfig {
   botToken: string;
   chatId: string;
+  telegramThreadId: number | null;
   lastDailyDigestDate: string;
   lastLogCleanupDate: string;
   autoScanEnabled: boolean;
@@ -101,6 +102,17 @@ interface TelegramTarget {
   botToken: string;
   chatId: string;
   threadId?: number;
+}
+
+interface CachedNoticeAttachmentItem {
+  kind: 'pdf' | 'image';
+  url: string;
+}
+
+interface CachedNoticeAttachmentRecord {
+  attachments: CachedNoticeAttachmentItem[];
+  textExcerpt: string | null;
+  pageTitle?: string | null;
 }
 
 class HttpStatusError extends Error {
@@ -115,6 +127,7 @@ class HttpStatusError extends Error {
 async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
   let dbToken = '';
   let dbChatId = '';
+  let dbThreadId: number | null = null;
   let lastDailyDigestDate = '';
   let lastLogCleanupDate = '';
   let autoScanEnabled = true;
@@ -128,6 +141,7 @@ async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
       .in('key', [
         'telegram_bot_token',
         'telegram_chat_id',
+        'telegram_thread_id',
         'last_daily_digest_date',
         'last_log_cleanup_date',
         'auto_scan_enabled',
@@ -144,6 +158,12 @@ async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
         }
         if (row.key === 'telegram_chat_id' && typeof row.value === 'string') {
           dbChatId = row.value.trim();
+        }
+        if (row.key === 'telegram_thread_id' && typeof row.value === 'string' && row.value.trim()) {
+          const parsedThread = Number(row.value.trim());
+          if (Number.isInteger(parsedThread) && parsedThread > 0) {
+            dbThreadId = parsedThread;
+          }
         }
         if (row.key === 'last_daily_digest_date' && typeof row.value === 'string') {
           lastDailyDigestDate = row.value.trim();
@@ -184,6 +204,7 @@ async function loadTelegramConfig(): Promise<TelegramRuntimeConfig> {
   return {
     botToken: dbToken || ENV_TELEGRAM_BOT_TOKEN,
     chatId: dbChatId || ENV_TELEGRAM_CHAT_ID,
+    telegramThreadId: dbThreadId,
     lastDailyDigestDate,
     lastLogCleanupDate,
     autoScanEnabled,
@@ -249,13 +270,53 @@ const NOTICE_MONTH_MAP: Record<string, number> = {
   ডিসেম্বর: 12,
 };
 
+const SCRAPER_MONTH_PATTERN_SOURCE =
+  '(?:জানুয়ারি|জানুয়ারি|জানু|ফেব্রুয়ারি|ফেব্রুয়ারি|ফেব্রু|মার্চ|এপ্রিল|মে|জুন|জুলাই|আগস্ট|অগাস্ট|সেপ্টেম্বর|অক্টোবর|নভেম্বর|ডিসেম্বর|january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)';
+
+function cleanExtractedNoticeDate(rawDate?: string | null): string {
+  if (!rawDate) return '';
+  const trimmed = rawDate.replace(/\s+/g, ' ').trim();
+  if (!trimmed) return '';
+
+  // ১. YYYY-MM-DD বা YYYY/MM/DD
+  const isoMatch = trimmed.match(
+    /(?:^|[^0-9০-৯])([0-9০-৯]{4}[-/][0-9০-৯]{1,2}[-/][0-9০-৯]{1,2})(?=$|[^0-9০-৯])/
+  );
+  if (isoMatch?.[1]) return isoMatch[1].trim();
+
+  // ২. DD-MM-YYYY বা DD/MM/YYYY বা DD.MM.YYYY
+  const dmyMatch = trimmed.match(
+    /(?:^|[^0-9০-৯])([0-9০-৯]{1,2}[-/.][0-9০-৯]{1,2}[-/.][0-9০-৯]{4})(?=$|[^0-9০-৯])/
+  );
+  if (dmyMatch?.[1]) return dmyMatch[1].trim();
+
+  // ৩. DD Month[,] YYYY (বাংলা বা ইংরেজি মাস)
+  const dmyWordRegex = new RegExp(
+    `(?:^|[^0-9০-৯])([0-9০-৯]{1,2}(?:\\s*(?:st|nd|rd|th|ই|শে|লা|রা|ঠা))?\\s+${SCRAPER_MONTH_PATTERN_SOURCE}[,\\s]+[0-9০-৯]{4})(?=$|[^0-9০-৯])`,
+    'i'
+  );
+  const dmyWordMatch = trimmed.match(dmyWordRegex);
+  if (dmyWordMatch?.[1]) return dmyWordMatch[1].replace(/\s+/g, ' ').trim();
+
+  // ৪. Month DD[,] YYYY
+  const mdyWordRegex = new RegExp(
+    `(${SCRAPER_MONTH_PATTERN_SOURCE}\\s+[0-9০-৯]{1,2}(?:st|nd|rd|th)?[,\\s]+[0-9০-৯]{4})(?=$|[^0-9০-৯])`,
+    'i'
+  );
+  const mdyWordMatch = trimmed.match(mdyWordRegex);
+  if (mdyWordMatch?.[1]) return mdyWordMatch[1].replace(/\s+/g, ' ').trim();
+
+  return trimmed;
+}
+
 function parseNoticePublishedAt(rawDate?: string | null, orderIndex = 0): string {
   const fallbackMs = Date.now() - orderIndex * 1000;
   if (!rawDate) return new Date(fallbackMs).toISOString();
 
-  const cleaned = rawDate
+  const normalizedExtracted = cleanExtractedNoticeDate(rawDate) || rawDate;
+  const cleaned = normalizedExtracted
     .replace(/[০-৯]/g, (d) => BENGALI_DIGITS_MAP[d] || d)
-    .replace(/(\d+)(st|nd|rd|th|ই|শে|লা|রা|ঠা)\b/gi, '$1')
+    .replace(/(\d+)(st|nd|rd|th|ই|শে|লা|রা|ঠা)(?=$|[^a-z0-9])/gi, '$1')
     .replace(/,/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -375,9 +436,10 @@ function extractNoticesFromHtml(
     if (seenLinks.has(absoluteLink)) return;
     seenLinks.add(absoluteLink);
 
-    const dateText = dateSelector
+    const rawDateText = dateSelector
       ? $row.find(dateSelector).text().replace(/\s+/g, ' ').trim()
       : '';
+    const dateText = cleanExtractedNoticeDate(rawDateText);
 
     notices.push({
       title,
@@ -404,12 +466,13 @@ function extractNoticesFromHtml(
       if (seenLinks.has(absoluteLink)) return;
       seenLinks.add(absoluteLink);
 
-      const dateText = $row
+      const rawDateText = $row
         .find('.date, time, td:first-child, td:nth-child(2)')
         .first()
         .text()
         .replace(/\s+/g, ' ')
         .trim();
+      const dateText = cleanExtractedNoticeDate(rawDateText);
       notices.push({
         title,
         link: absoluteLink,
@@ -509,19 +572,23 @@ function extractNoticesFromHtml(
           .replace(/\s+/g, ' ')
           .trim();
         if (explicitDate && explicitDate !== title && explicitDate.length <= 45) {
-          dateText = explicitDate;
+          dateText = cleanExtractedNoticeDate(explicitDate);
         } else {
           $card.find('span, div, p').each((__, spanEl) => {
             if (dateText) return;
-            const candidate = $(spanEl).text().replace(/\s+/g, ' ').trim();
+            const $candEl = $(spanEl);
+            // একাধিক নেস্টেড চাইল্ড থাকা আউটার র‍্যাপার স্কিপ করা হচ্ছে যাতে শিরোনাম/ক্রমিক নং তারিখের সাথে না জোড়ে
+            if ($candEl.children('div, p, h1, h2, h3, h4, a').length > 0) return;
+            const candidate = $candEl.text().replace(/\s+/g, ' ').trim();
             if (
               candidate &&
               candidate !== title &&
+              !candidate.includes(title) &&
               candidate.length >= 6 &&
-              candidate.length <= 36 &&
+              candidate.length <= 42 &&
               dateValueRegex.test(candidate)
             ) {
-              dateText = candidate;
+              dateText = cleanExtractedNoticeDate(candidate);
             }
           });
         }
@@ -968,42 +1035,77 @@ function formatTelegramMessage(
   return `${tagLine}🔔 নতুন নোটিশ — ${collegeName}${dateLine}${deadlineLine}\n\n📌 ${notice.title}\n🔗 ${notice.link}`;
 }
 
-function parseChatIdList(raw: string | null | undefined): string[] {
+interface ParsedChatTarget {
+  chatId: string;
+  threadId?: number;
+}
+
+function parseTelegramTargets(
+  raw: string | null | undefined,
+  fallbackThreadId?: number | null
+): ParsedChatTarget[] {
   if (!raw) return [];
   const seen = new Set<string>();
-  const list: string[] = [];
+  const list: ParsedChatTarget[] = [];
+  const validFallback =
+    typeof fallbackThreadId === 'number' && Number.isInteger(fallbackThreadId) && fallbackThreadId > 0
+      ? fallbackThreadId
+      : undefined;
+
   for (const part of raw.split(/[,\n]+/)) {
     const clean = part.trim().replace(/^\./, '');
-    if (clean && !seen.has(clean)) {
-      seen.add(clean);
-      list.push(clean);
+    if (!clean) continue;
+
+    let chatId = clean;
+    let threadId = validFallback;
+    const topicMatch = clean.match(/^(-?\d+|@[a-zA-Z0-9_]+)[#:\/](\d+)$/);
+    if (topicMatch) {
+      chatId = topicMatch[1];
+      const parsedTopic = Number(topicMatch[2]);
+      if (Number.isInteger(parsedTopic) && parsedTopic > 0) {
+        threadId = parsedTopic;
+      }
+    }
+
+    const dedupeKey = `${chatId}#${threadId ?? ''}`;
+    if (!seen.has(dedupeKey)) {
+      seen.add(dedupeKey);
+      list.push({ chatId, ...(threadId ? { threadId } : {}) });
     }
   }
   return list;
+}
+
+function parseChatIdList(raw: string | null | undefined): string[] {
+  return parseTelegramTargets(raw).map((t) => t.chatId);
 }
 
 function resolveCollegeTelegramTargets(
   college: CollegeRow,
   globalConfig: TelegramRuntimeConfig
 ): TelegramTarget[] {
-  const customChats = parseChatIdList(college.telegram_chat_id);
-  const globalChats = parseChatIdList(globalConfig.chatId);
-  const threadId =
+  const collegeThreadId =
     typeof college.telegram_thread_id === 'number' && college.telegram_thread_id > 0
       ? college.telegram_thread_id
       : undefined;
+  const effectiveThreadFallback = collegeThreadId ?? globalConfig.telegramThreadId ?? undefined;
 
-  if (customChats.length > 0) {
-    return customChats.map((chatId, idx) => ({
+  const customTargets = parseTelegramTargets(college.telegram_chat_id, effectiveThreadFallback);
+  if (customTargets.length > 0) {
+    return customTargets.map((t) => ({
       botToken: globalConfig.botToken,
-      chatId,
-      threadId: idx === 0 ? threadId : undefined,
+      chatId: t.chatId,
+      ...(t.threadId ? { threadId: t.threadId } : {}),
     }));
   }
 
-  return globalChats.map((chatId) => ({
+  // যদি কাস্টম Chat ID না দেওয়া থাকে কিন্তু কলেজের Topic ID দেওয়া থাকে,
+  // তাহলে ডিফল্ট সুপারগ্রুপ Chat ID-র ওই নির্দিষ্ট টপিকে মেসেজ যাবে
+  const globalTargets = parseTelegramTargets(globalConfig.chatId, effectiveThreadFallback);
+  return globalTargets.map((t) => ({
     botToken: globalConfig.botToken,
-    chatId,
+    chatId: t.chatId,
+    ...(collegeThreadId ? { threadId: collegeThreadId } : t.threadId ? { threadId: t.threadId } : {}),
   }));
 }
 
@@ -1200,7 +1302,100 @@ function extractAttachmentsFromDetailHtml(html: string, detailUrl: string): stri
     pushCandidate(imageCandidates, src);
   });
 
+  // ৩. যদি নির্দিষ্ট কন্টেইনারে কিছু না মেলে, তাহলে পুরো body এবং স্ক্রিপ্ট/অ্যাট্রিবিউট থেকে খোঁজা
+  if (pdfCandidates.length === 0 && imageCandidates.length === 0 && $scope.length > 0) {
+    $('body')
+      .find('a[href], iframe[src], embed[src], object[data]')
+      .each((_, el) => {
+        const $el = $(el);
+        if ($el.closest('nav, header, footer').length > 0) return;
+        const urlAttr = $el.attr('href') || $el.attr('src') || $el.attr('data');
+        if (!urlAttr) return;
+        const lower = urlAttr.toLowerCase();
+        if (lower.includes('.pdf') || lower.includes('drive.google.com')) {
+          pushCandidate(pdfCandidates, urlAttr);
+        }
+      });
+  }
+
+  if (pdfCandidates.length === 0 && imageCandidates.length === 0) {
+    const rawMediaRegex =
+      /(https?:\/\/[^\s"'<>\\]+\.(?:pdf|jpg|jpeg|png|webp)(?:\?[^\s"'<>\\]*)?|\/[^\s"'<>\\]*(?:uploads?|files?|notices?|documents?|attachments?|media)\/[^\s"'<>\\]+\.(?:pdf|jpg|jpeg|png|webp))/gi;
+    let m: RegExpExecArray | null;
+    while ((m = rawMediaRegex.exec(html)) !== null) {
+      const candidate = m[1];
+      if (!candidate) continue;
+      if (/logo|icon|favicon|avatar/i.test(candidate)) continue;
+      if (/\.pdf(\?|$)/i.test(candidate)) {
+        pushCandidate(pdfCandidates, candidate);
+      } else {
+        pushCandidate(imageCandidates, candidate);
+      }
+    }
+  }
+
   return [...pdfCandidates, ...imageCandidates];
+}
+
+async function saveNoticeAttachmentCacheEntries(
+  entries: Record<string, CachedNoticeAttachmentRecord>
+): Promise<void> {
+  const keys = Object.keys(entries);
+  if (keys.length === 0) return;
+
+  try {
+    const { data } = await supabase
+      .from('settings')
+      .select('value')
+      .eq('key', 'notice_attachments_cache')
+      .maybeSingle();
+
+    let currentMap: Record<string, CachedNoticeAttachmentRecord> = {};
+    if (data?.value && typeof data.value === 'string') {
+      try {
+        const parsed = JSON.parse(data.value);
+        if (parsed && typeof parsed === 'object') {
+          currentMap = parsed as Record<string, CachedNoticeAttachmentRecord>;
+        }
+      } catch {
+        currentMap = {};
+      }
+    }
+
+    const merged: Record<string, CachedNoticeAttachmentRecord> = {
+      ...currentMap,
+      ...entries,
+    };
+
+    const allKeys = Object.keys(merged);
+    if (allKeys.length > 200) {
+      const trimmed: Record<string, CachedNoticeAttachmentRecord> = {};
+      for (const k of allKeys.slice(-200)) {
+        trimmed[k] = merged[k];
+      }
+      await supabase.from('settings').upsert(
+        {
+          key: 'notice_attachments_cache',
+          value: JSON.stringify(trimmed),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'key' }
+      );
+    } else {
+      await supabase.from('settings').upsert(
+        {
+          key: 'notice_attachments_cache',
+          value: JSON.stringify(merged),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'key' }
+      );
+    }
+  } catch (err: unknown) {
+    console.warn(
+      `[Attachment Cache] Save skipped: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 async function tryDownloadDirectAttachment(
@@ -1335,9 +1530,80 @@ function extractDeadlineIsoFromText(text: string): string | null {
   return null;
 }
 
+async function fetchDetailHtmlAndText(
+  noticeLink: string,
+  selectorConfig: SelectorConfig = {}
+): Promise<{
+  detailHtml: string;
+  detailFinalUrl: string;
+  extractedText: string;
+  candidates: string[];
+} | null> {
+  const normalizedUrl = normalizeAttachmentUrl(noticeLink);
+  const pageFetch = await fetchHtmlWithDetails(normalizedUrl, selectorConfig).catch(() => null);
+  let detailHtml = '';
+  let detailFinalUrl = normalizedUrl;
+
+  if (pageFetch && pageFetch.ok) {
+    if (looksLikeSpaHtml(pageFetch.html)) {
+      const rendered = await renderSpaWithPlaywright(normalizedUrl).catch(() => null);
+      if (rendered) {
+        detailHtml = rendered.html;
+        detailFinalUrl = rendered.finalUrl;
+      }
+    } else {
+      detailHtml = pageFetch.html;
+      detailFinalUrl = pageFetch.finalUrl;
+    }
+  } else if (pageFetch && !pageFetch.ok && pageFetch.status === 404) {
+    const parsed = new URL(normalizedUrl);
+    if (parsed.pathname && parsed.pathname !== '/') {
+      const originUrl = `${parsed.origin}/`;
+      const originRes = await fetchHtmlWithDetails(originUrl, selectorConfig).catch(() => null);
+      if (originRes && originRes.ok && looksLikeSpaHtml(originRes.html)) {
+        const rendered = await renderSpaWithPlaywright(normalizedUrl, {
+          spaOriginUrl: originUrl,
+        }).catch(() => null);
+        if (rendered) {
+          detailHtml = rendered.html;
+          detailFinalUrl = rendered.finalUrl;
+        }
+      }
+    }
+  }
+
+  if (!detailHtml) return null;
+
+  const $detail = cheerio.load(detailHtml);
+  $detail('script, style, nav, header, footer').remove();
+  const extractedText = $detail('body').text().replace(/\s+/g, ' ').trim().slice(0, 6000);
+  const candidates = extractAttachmentsFromDetailHtml(detailHtml, detailFinalUrl);
+
+  return { detailHtml, detailFinalUrl, extractedText, candidates };
+}
+
+function buildCacheRecordFromCandidates(
+  candidates: string[],
+  extractedText: string,
+  pageTitle?: string
+): CachedNoticeAttachmentRecord | null {
+  const items: CachedNoticeAttachmentItem[] = candidates.slice(0, 8).map((url) => ({
+    kind: looksLikeImageUrl(url) ? 'image' : 'pdf',
+    url,
+  }));
+  const cleanExcerpt = extractedText ? extractedText.slice(0, 1200) : null;
+  if (items.length === 0 && !cleanExcerpt) return null;
+  return {
+    attachments: items,
+    textExcerpt: cleanExcerpt,
+    ...(pageTitle ? { pageTitle: pageTitle.slice(0, 200) } : {}),
+  };
+}
+
 async function resolveNoticeAttachmentAndText(
   noticeLink: string,
-  title: string
+  title: string,
+  selectorConfig: SelectorConfig = {}
 ): Promise<{ attachment: DownloadedAttachment | null; extractedText: string }> {
   const normalizedUrl = normalizeAttachmentUrl(noticeLink);
   let extractedText = '';
@@ -1349,52 +1615,32 @@ async function resolveNoticeAttachmentAndText(
       if (directMedia.kind === 'pdf') {
         extractedText = extractTextFromPdfBuffer(directMedia.buffer);
       }
+      await saveNoticeAttachmentCacheEntries({
+        [noticeLink]: {
+          attachments: [{ kind: directMedia.kind, url: normalizedUrl }],
+          textExcerpt: extractedText ? extractedText.slice(0, 1200) : null,
+          pageTitle: title,
+        },
+      });
       return { attachment: directMedia, extractedText };
     }
   }
 
-  // ২. ডিটেইল পেইজ HTML থেকে সংযুক্ত PDF বা ছবি ও টেক্সট খুঁজে বের করা
+  // ২. ডিটেইল পেইজ HTML/SPA থেকে সংযুক্ত PDF বা ছবি ও টেক্সট খুঁজে বের করা এবং প্রিভিউর জন্য ক্যাশ করা
   try {
-    const pageFetch = await fetchHtmlWithDetails(normalizedUrl).catch(() => null);
-    let detailHtml = '';
-    let detailFinalUrl = normalizedUrl;
+    const detail = await fetchDetailHtmlAndText(noticeLink, selectorConfig);
+    if (!detail) return { attachment: null, extractedText };
 
-    if (pageFetch && pageFetch.ok) {
-      if (looksLikeSpaHtml(pageFetch.html)) {
-        const rendered = await renderSpaWithPlaywright(normalizedUrl).catch(() => null);
-        if (rendered) {
-          detailHtml = rendered.html;
-          detailFinalUrl = rendered.finalUrl;
-        }
-      } else {
-        detailHtml = pageFetch.html;
-        detailFinalUrl = pageFetch.finalUrl;
-      }
-    } else if (pageFetch && !pageFetch.ok && pageFetch.status === 404) {
-      const parsed = new URL(normalizedUrl);
-      if (parsed.pathname && parsed.pathname !== '/') {
-        const originUrl = `${parsed.origin}/`;
-        const originRes = await fetchHtmlWithDetails(originUrl).catch(() => null);
-        if (originRes && originRes.ok && looksLikeSpaHtml(originRes.html)) {
-          const rendered = await renderSpaWithPlaywright(normalizedUrl, {
-            spaOriginUrl: originUrl,
-          }).catch(() => null);
-          if (rendered) {
-            detailHtml = rendered.html;
-            detailFinalUrl = rendered.finalUrl;
-          }
-        }
-      }
+    extractedText = detail.extractedText;
+    const cacheRecord = buildCacheRecordFromCandidates(detail.candidates, extractedText, title);
+    if (cacheRecord) {
+      await saveNoticeAttachmentCacheEntries({
+        [noticeLink]: cacheRecord,
+        ...(normalizedUrl !== noticeLink ? { [normalizedUrl]: cacheRecord } : {}),
+      });
     }
 
-    if (!detailHtml) return { attachment: null, extractedText };
-
-    const $detail = cheerio.load(detailHtml);
-    $detail('script, style, nav, header, footer').remove();
-    extractedText = $detail('body').text().replace(/\s+/g, ' ').trim().slice(0, 6000);
-
-    const candidates = extractAttachmentsFromDetailHtml(detailHtml, detailFinalUrl);
-    for (const candidateUrl of candidates.slice(0, 4)) {
+    for (const candidateUrl of detail.candidates.slice(0, 4)) {
       const media = await tryDownloadDirectAttachment(candidateUrl, title);
       if (media) {
         if (media.kind === 'pdf') {
@@ -1509,7 +1755,8 @@ async function deliverPreparedNoticeToTarget(
 async function sendNoticeWithAttachmentSupport(
   collegeName: string,
   notice: ScrapedNotice,
-  targets: TelegramTarget[]
+  targets: TelegramTarget[],
+  selectorConfig: SelectorConfig = {}
 ): Promise<{
   ok: boolean;
   deliveryType: 'pdf' | 'photo' | 'text';
@@ -1521,7 +1768,8 @@ async function sendNoticeWithAttachmentSupport(
 }> {
   const { attachment, extractedText } = await resolveNoticeAttachmentAndText(
     notice.link,
-    notice.title
+    notice.title,
+    selectorConfig
   );
   const deadlineIso = extractDeadlineIsoFromText(`${notice.title} ${extractedText}`);
   const fullText = formatTelegramMessage(collegeName, notice, deadlineIso);
@@ -1592,13 +1840,17 @@ async function updateCollegeHealth(
       `কারণ: ${outcome.errorMessage}\n` +
       `লিংক: ${college.notice_url}`;
 
-    const adminChats = parseChatIdList(globalConfig.chatId);
+    const adminTargets = parseTelegramTargets(
+      globalConfig.chatId,
+      globalConfig.telegramThreadId
+    );
     let anySent = false;
     let lastErr = '';
-    for (const adminChatId of adminChats) {
+    for (const t of adminTargets) {
       const alertRes = await sendTelegramTextMessage(alertText, {
         botToken: globalConfig.botToken,
-        chatId: adminChatId,
+        chatId: t.chatId,
+        ...(t.threadId ? { threadId: t.threadId } : {}),
       });
       if (alertRes.ok) {
         anySent = true;
@@ -1608,7 +1860,7 @@ async function updateCollegeHealth(
     }
     if (anySent) {
       console.log(`[Health Alert] Sent failure alert for ${college.name} (failures=${nextFailures})`);
-    } else if (adminChats.length > 0) {
+    } else if (adminTargets.length > 0) {
       console.error(`[Health Alert] Failed to send alert for ${college.name}: ${lastErr}`);
     }
   }
@@ -1773,7 +2025,8 @@ async function processCollege(
         link: row.link,
         date: row.date || undefined,
       },
-      targets
+      targets,
+      college.selector_config
     );
 
     if (sendRes.ok) {
@@ -1928,13 +2181,17 @@ async function maybeSendDailyDigest(globalConfig: TelegramRuntimeConfig): Promis
     }
   }
 
-  const digestTargets = parseChatIdList(globalConfig.chatId);
+  const digestTargets = parseTelegramTargets(
+    globalConfig.chatId,
+    globalConfig.telegramThreadId
+  );
   let digestSentAny = false;
   let lastDigestErr = '';
-  for (const chatId of digestTargets) {
+  for (const t of digestTargets) {
     const sendRes = await sendTelegramTextMessage(lines.join('\n'), {
       botToken: globalConfig.botToken,
-      chatId,
+      chatId: t.chatId,
+      ...(t.threadId ? { threadId: t.threadId } : {}),
     });
     if (sendRes.ok) {
       digestSentAny = true;
@@ -2000,24 +2257,24 @@ async function maybeSendDeadlineReminders(globalConfig: TelegramRuntimeConfig): 
         `📌 ${entry.title}\n` +
         `🔗 ${entry.link}`;
 
-      const customChats = parseChatIdList(entry.chat_id);
-      const targetChats = customChats.length > 0 ? customChats : parseChatIdList(globalConfig.chatId);
+      const entryThreadFallback = entry.thread_id ?? globalConfig.telegramThreadId ?? undefined;
+      const customTargets = parseTelegramTargets(entry.chat_id, entryThreadFallback);
+      const targets =
+        customTargets.length > 0
+          ? customTargets
+          : parseTelegramTargets(globalConfig.chatId, entryThreadFallback);
       const sentSet = new Set<string>();
       let sentOk = false;
 
-      for (let i = 0; i < targetChats.length; i++) {
-        const cid = targetChats[i];
+      for (const t of targets) {
         const res = await sendTelegramTextMessage(reminderText, {
           botToken: globalConfig.botToken,
-          chatId: cid,
-          threadId:
-            customChats.length > 0 && i === 0 && entry.thread_id && entry.thread_id > 0
-              ? entry.thread_id
-              : undefined,
+          chatId: t.chatId,
+          ...(t.threadId ? { threadId: t.threadId } : {}),
         });
         if (res.ok) {
           sentOk = true;
-          sentSet.add(cid);
+          sentSet.add(t.chatId);
         }
       }
 
@@ -2250,6 +2507,30 @@ async function runBaselineMode(): Promise<void> {
     if (upsertRes.errorMessage) {
       throw new Error(`Baseline upsert failed: ${upsertRes.errorMessage}`);
     }
+
+    // প্রিভিউ মোডালের জন্য সাম্প্রতিক ১০টি নোটিশের PDF/ছবি ডিটেইল ক্যাশ করা হচ্ছে (SPA/404 সাইটসহ)
+    const cacheEntries: Record<string, CachedNoticeAttachmentRecord> = {};
+    for (const item of scrapedNotices.slice(0, 10)) {
+      const normalized = normalizeAttachmentUrl(item.link);
+      if (looksLikePdfUrl(normalized) || looksLikeImageUrl(normalized)) {
+        cacheEntries[item.link] = {
+          attachments: [{ kind: looksLikeImageUrl(normalized) ? 'image' : 'pdf', url: normalized }],
+          textExcerpt: null,
+          pageTitle: item.title,
+        };
+        continue;
+      }
+      const detail = await fetchDetailHtmlAndText(item.link, targetCollege.selector_config).catch(
+        () => null
+      );
+      if (detail) {
+        const rec = buildCacheRecordFromCandidates(detail.candidates, detail.extractedText, item.title);
+        if (rec) {
+          cacheEntries[item.link] = rec;
+        }
+      }
+    }
+    await saveNoticeAttachmentCacheEntries(cacheEntries);
 
     const sample = scrapedNotices.slice(0, 5).map((item) => ({
       title: item.title,

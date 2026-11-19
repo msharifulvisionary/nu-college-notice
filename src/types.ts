@@ -55,6 +55,7 @@ export interface TelegramSettingsResponse {
   telegram_bot_token_masked: string;
   has_telegram_bot_token: boolean;
   telegram_chat_id: string;
+  telegram_thread_id?: number | null;
   message?: string;
 }
 
@@ -174,6 +175,7 @@ export interface NoticePreviewResponse {
   pageTitle?: string | null;
   textExcerpt?: string | null;
   attachments: NoticePreviewAttachment[];
+  isSpaSite?: boolean;
   error?: string;
 }
 

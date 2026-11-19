@@ -347,8 +347,13 @@ export const CollegeList: React.FC<CollegeListProps> = ({
                       <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-sky-50 text-sky-700 border border-sky-200 font-medium">
                         <MessageSquare className="w-3 h-3" />
                         <span>
-                          কাস্টম চ্যাট
-                          {college.telegram_thread_id ? ` (টপিক #${college.telegram_thread_id})` : ''}
+                          {college.telegram_chat_id
+                            ? `কাস্টম চ্যাট${
+                                college.telegram_thread_id
+                                  ? ` · টপিক #${college.telegram_thread_id}`
+                                  : ''
+                              }`
+                            : `ডিফল্ট সুপারগ্রুপ · টপিক #${college.telegram_thread_id}`}
                         </span>
                       </span>
                     )}

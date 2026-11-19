@@ -565,13 +565,17 @@ export default function App() {
   );
 
   const handleSaveTelegramSettings = useCallback(
-    (payload: { telegram_bot_token?: string; telegram_chat_id: string }) =>
-      saveAdminSettings(payload, handleUnauthorized),
+    (payload: {
+      telegram_bot_token?: string;
+      telegram_chat_id: string;
+      telegram_thread_id?: number | null;
+    }) => saveAdminSettings(payload, handleUnauthorized),
     [handleUnauthorized]
   );
 
   const handleSendTelegramTest = useCallback(
-    (message?: string) => sendAdminTelegramTest(message, handleUnauthorized),
+    (payload?: string | { message?: string; chat_id?: string; thread_id?: number | null }) =>
+      sendAdminTelegramTest(payload, handleUnauthorized),
     [handleUnauthorized]
   );
 

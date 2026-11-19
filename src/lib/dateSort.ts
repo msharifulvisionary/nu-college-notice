@@ -70,10 +70,46 @@ function buildValidDateMs(year: number, month: number, day: number): number | nu
   return Number.isNaN(parsed) ? null : parsed;
 }
 
+const MONTH_PATTERN_SOURCE =
+  '(?:জানুয়ারি|জানুয়ারি|জানু|ফেব্রুয়ারি|ফেব্রুয়ারি|ফেব্রু|মার্চ|এপ্রিল|মে|জুন|জুলাই|আগস্ট|অগাস্ট|সেপ্টেম্বর|অক্টোবর|নভেম্বর|ডিসেম্বর|january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)';
+
+export function formatCleanNoticeDate(rawDate?: string | null): string {
+  if (!rawDate) return '';
+  const trimmed = rawDate.replace(/\s+/g, ' ').trim();
+  if (!trimmed) return '';
+
+  // ১. YYYY-MM-DD বা YYYY/MM/DD
+  const isoMatch = trimmed.match(/(?:^|[^0-9০-৯])([0-9০-৯]{4}[-/][0-9০-৯]{1,2}[-/][0-9০-৯]{1,2})(?=$|[^0-9০-৯])/);
+  if (isoMatch?.[1]) return isoMatch[1].trim();
+
+  // ২. DD-MM-YYYY বা DD/MM/YYYY বা DD.MM.YYYY
+  const dmyMatch = trimmed.match(/(?:^|[^0-9০-৯])([0-9০-৯]{1,2}[-/.][0-9০-৯]{1,2}[-/.][0-9০-৯]{4})(?=$|[^0-9০-৯])/);
+  if (dmyMatch?.[1]) return dmyMatch[1].trim();
+
+  // ৩. DD Month[,] YYYY (বাংলা বা ইংরেজি মাস — যেমন: ১৮ নভেম্বর, ২০২৬)
+  const dmyWordRegex = new RegExp(
+    `(?:^|[^0-9০-৯])([0-9০-৯]{1,2}(?:\\s*(?:st|nd|rd|th|ই|শে|লা|রা|ঠা))?\\s+${MONTH_PATTERN_SOURCE}[,\\s]+[0-9০-৯]{4})(?=$|[^0-9০-৯])`,
+    'i'
+  );
+  const dmyWordMatch = trimmed.match(dmyWordRegex);
+  if (dmyWordMatch?.[1]) return dmyWordMatch[1].replace(/\s+/g, ' ').trim();
+
+  // ৪. Month DD[,] YYYY (যেমন: November 18, 2026)
+  const mdyWordRegex = new RegExp(
+    `(${MONTH_PATTERN_SOURCE}\\s+[0-9০-৯]{1,2}(?:st|nd|rd|th)?[,\\s]+[0-9০-৯]{4})(?=$|[^0-9০-৯])`,
+    'i'
+  );
+  const mdyWordMatch = trimmed.match(mdyWordRegex);
+  if (mdyWordMatch?.[1]) return mdyWordMatch[1].replace(/\s+/g, ' ').trim();
+
+  return trimmed;
+}
+
 export function parseNoticeDateMs(rawDate?: string | null): number | null {
   if (!rawDate) return null;
-  const cleaned = toAsciiDigits(rawDate)
-    .replace(/(\d+)(st|nd|rd|th|ই|শে|লা|রা|ঠা)\b/gi, '$1')
+  const extracted = formatCleanNoticeDate(rawDate) || rawDate;
+  const cleaned = toAsciiDigits(extracted)
+    .replace(/(\d+)(st|nd|rd|th|ই|শে|লা|রা|ঠা)(?=$|[^a-z0-9])/gi, '$1')
     .replace(/,/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -81,14 +117,14 @@ export function parseNoticeDateMs(rawDate?: string | null): number | null {
   if (!cleaned) return null;
 
   // 1. YYYY-MM-DD বা YYYY/MM/DD (বা ISO timestamp)
-  const isoMatch = cleaned.match(/\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b/);
+  const isoMatch = cleaned.match(/(?:^|\D)(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?=\D|$)/);
   if (isoMatch) {
     const ms = buildValidDateMs(Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3]));
     if (ms !== null) return ms;
   }
 
   // 2. DD-MM-YYYY বা DD/MM/YYYY বা DD.MM.YYYY
-  const dmyMatch = cleaned.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
+  const dmyMatch = cleaned.match(/(?:^|\D)(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?=\D|$)/);
   if (dmyMatch) {
     const first = Number(dmyMatch[1]);
     const second = Number(dmyMatch[2]);

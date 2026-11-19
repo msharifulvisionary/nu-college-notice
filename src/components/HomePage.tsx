@@ -19,7 +19,7 @@ import {
   Eye,
 } from 'lucide-react';
 import { College, Notice } from '../types';
-import { sortNoticesByDateDesc } from '../lib/dateSort';
+import { formatCleanNoticeDate, sortNoticesByDateDesc } from '../lib/dateSort';
 import { NoticePreviewModal } from './NoticePreviewModal';
 
 interface HomePageProps {
@@ -151,7 +151,8 @@ export const HomePage: React.FC<HomePageProps> = ({
   });
 
   const handleCopyNotice = async (notice: Notice) => {
-    const shareText = `${notice.college_name ? `${notice.college_name} — ` : ''}${notice.title}${notice.date ? ` (${notice.date})` : ''}\n${notice.link}`;
+    const cleanDate = formatCleanNoticeDate(notice.date);
+    const shareText = `${notice.college_name ? `${notice.college_name} — ` : ''}${notice.title}${cleanDate ? ` (${cleanDate})` : ''}\n${notice.link}`;
     try {
       await navigator.clipboard.writeText(shareText);
       setCopiedNoticeId(notice.id);
@@ -357,7 +358,8 @@ export const HomePage: React.FC<HomePageProps> = ({
             <>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {visibleNotices.map((notice) => {
-                  const shareText = `${notice.college_name ? `${notice.college_name} — ` : ''}${notice.title}${notice.date ? ` (${notice.date})` : ''}\n${notice.link}`;
+                  const cleanDate = formatCleanNoticeDate(notice.date);
+                  const shareText = `${notice.college_name ? `${notice.college_name} — ` : ''}${notice.title}${cleanDate ? ` (${cleanDate})` : ''}\n${notice.link}`;
                   const whatsappHref = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
                   const isCopied = copiedNoticeId === notice.id;
 
@@ -372,10 +374,10 @@ export const HomePage: React.FC<HomePageProps> = ({
                             {notice.college_name || 'Govt. College'}
                           </span>
 
-                          {notice.date && (
+                          {cleanDate && (
                             <span className="text-[11px] text-slate-500 flex items-center space-x-1 font-medium shrink-0 tabular-nums">
-                              <Calendar className="w-3 h-3 text-slate-400" />
-                              <span>{notice.date}</span>
+                              <Calendar className="w-3 h-3 text-slate-400 shrink-0" />
+                              <span>{cleanDate}</span>
                             </span>
                           )}
                         </div>

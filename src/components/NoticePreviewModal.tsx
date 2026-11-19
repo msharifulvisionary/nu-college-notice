@@ -22,6 +22,7 @@ import {
   NoticePreviewAttachment,
   NoticePreviewResponse,
 } from '../types';
+import { formatCleanNoticeDate } from '../lib/dateSort';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -409,10 +410,12 @@ export const NoticePreviewModal: React.FC<NoticePreviewModalProps> = ({
   const handleZoomIn = () => setZoom((z) => Math.min(2.5, Number((z + 0.25).toFixed(2))));
   const handleZoomReset = () => setZoom(1);
 
+  const cleanDate = formatCleanNoticeDate(notice.date);
+  const formattedTelegramPreview = `🔔 নতুন নোটিশ — ${notice.college_name || 'জাতীয় বিশ্ববিদ্যালয় কলেজ'}${cleanDate ? `\n📅 তারিখ: ${cleanDate}` : ''}\n\n📌 ${notice.title}\n🔗 ${notice.link}`;
+
   const handleCopyTelegramMessage = async () => {
-    const formatted = `🔔 ${notice.college_name || 'জাতীয় বিশ্ববিদ্যালয় কলেজ'} - নতুন নোটিশ\n\n📌 শিরোনাম: ${notice.title}\n📅 তারিখ: ${notice.date || 'আজকের নোটিশ'}\n\n🔗 নোটিশ দেখুন: ${notice.link}`;
     try {
-      await navigator.clipboard.writeText(formatted);
+      await navigator.clipboard.writeText(formattedTelegramPreview);
       setCopiedTelegram(true);
       window.setTimeout(() => setCopiedTelegram(false), 2000);
     } catch {
@@ -435,9 +438,9 @@ export const NoticePreviewModal: React.FC<NoticePreviewModalProps> = ({
         <div className="min-w-0 flex-1 pr-1">
           <div className="flex items-center gap-2 text-[11px] text-emerald-400 font-bold leading-tight">
             <span className="truncate">{notice.college_name || 'সরকারি কলেজ'}</span>
-            {notice.date && (
+            {cleanDate && (
               <span className="text-slate-400 font-medium shrink-0 tabular-nums">
-                · {notice.date}
+                · {cleanDate}
               </span>
             )}
           </div>
@@ -575,6 +578,10 @@ export const NoticePreviewModal: React.FC<NoticePreviewModalProps> = ({
               <span>{copiedTelegram ? 'মেসেজ কপি হয়েছে' : 'টেলিগ্রাম মেসেজ কপি করুন'}</span>
             </button>
           </div>
+
+          <pre className="p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-[11px] font-sans text-slate-200 whitespace-pre-wrap leading-relaxed">
+            {formattedTelegramPreview}
+          </pre>
         </div>
       )}
 
@@ -712,23 +719,47 @@ export const NoticePreviewModal: React.FC<NoticePreviewModalProps> = ({
               )}
 
               <div className="pt-3 flex flex-wrap items-center gap-2.5">
-                <a
-                  href={notice.link}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center space-x-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  <span>মূল নোটিশ ওয়েবসাইট খুলুন</span>
-                </a>
-                <button
-                  type="button"
-                  onClick={() => setShowWebpageIframe(true)}
-                  className="inline-flex items-center space-x-1.5 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-bold cursor-pointer"
-                >
-                  <Globe className="w-4 h-4" />
-                  <span>এখানে পেইজ লোড করুন</span>
-                </button>
+                {previewData?.isSpaSite ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setShowWebpageIframe(true)}
+                      className="inline-flex items-center space-x-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer"
+                    >
+                      <Globe className="w-4 h-4" />
+                      <span>লাইভ সাইটে দেখুন</span>
+                    </button>
+                    <a
+                      href={notice.link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center space-x-1.5 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-bold"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      <span>মূল নোটিশ ওয়েবসাইট খুলুন</span>
+                    </a>
+                  </>
+                ) : (
+                  <>
+                    <a
+                      href={notice.link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center space-x-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      <span>মূল নোটিশ ওয়েবসাইট খুলুন</span>
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => setShowWebpageIframe(true)}
+                      className="inline-flex items-center space-x-1.5 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-bold cursor-pointer"
+                    >
+                      <Globe className="w-4 h-4" />
+                      <span>এখানে পেইজ লোড করুন</span>
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>
