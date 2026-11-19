@@ -22,7 +22,7 @@ import {
   NoticePreviewAttachment,
   NoticePreviewResponse,
 } from '../types';
-import { formatCleanNoticeDate } from '../lib/dateSort';
+import { formatCleanNoticeDate, buildTelegramNoticePreview } from '../lib/dateSort';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -411,7 +411,7 @@ export const NoticePreviewModal: React.FC<NoticePreviewModalProps> = ({
   const handleZoomReset = () => setZoom(1);
 
   const cleanDate = formatCleanNoticeDate(notice.date);
-  const formattedTelegramPreview = `🔔 নতুন নোটিশ — ${notice.college_name || 'জাতীয় বিশ্ববিদ্যালয় কলেজ'}${cleanDate ? `\n📅 তারিখ: ${cleanDate}` : ''}\n\n📌 ${notice.title}\n🔗 ${notice.link}`;
+  const formattedTelegramPreview = buildTelegramNoticePreview(notice);
 
   const handleCopyTelegramMessage = async () => {
     try {

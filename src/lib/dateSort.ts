@@ -184,3 +184,61 @@ export function sortNoticesByDateDesc(notices: Notice[]): Notice[] {
     return bCreated - aCreated;
   });
 }
+
+export function buildTelegramNoticePreview(notice: Notice): string {
+  const cleanDate = formatCleanNoticeDate(notice.date);
+  const lower = notice.title.toLowerCase();
+  const tags: string[] = [];
+
+  if (lower.includes('ফরম') || lower.includes('ফর্ম') || lower.includes('form')) {
+    tags.push('[ফরম পূরণ]');
+  }
+  if (
+    lower.includes('রুটিন') ||
+    lower.includes('সময়সূচী') ||
+    lower.includes('সময়সূচী') ||
+    lower.includes('routine') ||
+    lower.includes('schedule')
+  ) {
+    tags.push('[পরীক্ষার রুটিন]');
+  }
+  if (lower.includes('ফলাফল') || lower.includes('ফল') || lower.includes('result')) {
+    tags.push('[ফলাফল]');
+  }
+  if (lower.includes('ভর্তি') || lower.includes('admission')) {
+    tags.push('[ভর্তি]');
+  }
+  if (lower.includes('স্থগিত') || lower.includes('বাতিল') || lower.includes('postponed')) {
+    tags.push('[স্থগিত]');
+  }
+  if ((lower.includes('পরীক্ষা') || lower.includes('exam')) && !tags.includes('[পরীক্ষার রুটিন]')) {
+    tags.push('[পরীক্ষা]');
+  }
+
+  const isUrgent =
+    lower.includes('জরুরি') ||
+    lower.includes('অতি জরুরি') ||
+    lower.includes('urgent') ||
+    lower.includes('স্থগিত') ||
+    lower.includes('বাতিল') ||
+    lower.includes('সংশোধিত') ||
+    lower.includes('সময় বৃদ্ধি') ||
+    lower.includes('সময় বৃদ্ধি') ||
+    lower.includes('বর্ধিত') ||
+    tags.includes('[ফরম পূরণ]') ||
+    tags.includes('[পরীক্ষার রুটিন]') ||
+    tags.includes('[ফলাফল]');
+
+  const tagText = tags.slice(0, 3).join(' ');
+  let tagLine = '';
+  if (isUrgent && tagText) {
+    tagLine = `🚨 জরুরি · ${tagText}\n`;
+  } else if (isUrgent) {
+    tagLine = '🚨 জরুরি\n';
+  } else if (tagText) {
+    tagLine = `🏷️ ${tagText}\n`;
+  }
+
+  const dateLine = cleanDate ? `\n📅 তারিখ: ${cleanDate}` : '';
+  return `${tagLine}🔔 নতুন নোটিশ — ${notice.college_name || 'জাতীয় বিশ্ববিদ্যালয় কলেজ'}${dateLine}\n\n📌 ${notice.title}\n🔗 ${notice.link}`;
+}

@@ -14,7 +14,7 @@ import {
   Tag,
 } from 'lucide-react';
 import { Notice, College } from '../types';
-import { formatCleanNoticeDate, sortNoticesByDateDesc } from '../lib/dateSort';
+import { formatCleanNoticeDate, sortNoticesByDateDesc, buildTelegramNoticePreview } from '../lib/dateSort';
 import { NoticePreviewModal } from './NoticePreviewModal';
 
 interface NoticeHistoryProps {
@@ -46,45 +46,6 @@ export const getNoticeCategory = (title: string): string => {
   }
   return 'সাধারণ নোটিশ';
 };
-
-function buildTelegramFormatPreview(notice: Notice): string {
-  const cleanDate = formatCleanNoticeDate(notice.date);
-  const lower = notice.title.toLowerCase();
-  const tags: string[] = [];
-
-  if (lower.includes('ফরম') || lower.includes('ফর্ম') || lower.includes('form')) {
-    tags.push('#ফরম_পূরণ');
-  }
-  if (lower.includes('রুটিন') || lower.includes('সময়সূচী') || lower.includes('routine') || lower.includes('schedule')) {
-    tags.push('#পরীক্ষার_রুটিন');
-  }
-  if (lower.includes('ফলাফল') || lower.includes('ফল') || lower.includes('result')) {
-    tags.push('#ফলাফল');
-  }
-  if (lower.includes('ভর্তি') || lower.includes('admission')) {
-    tags.push('#ভর্তি');
-  }
-  if (lower.includes('স্থগিত') || lower.includes('বাতিল') || lower.includes('postponed')) {
-    tags.push('#স্থগিত');
-  }
-
-  const isUrgent =
-    lower.includes('জরুরি') ||
-    lower.includes('urgent') ||
-    lower.includes('স্থগিত') ||
-    lower.includes('সংশোধিত') ||
-    tags.includes('#ফরম_পূরণ') ||
-    tags.includes('#পরীক্ষার_রুটিন') ||
-    tags.includes('#ফলাফল');
-
-  const tagHeaderParts: string[] = [];
-  if (isUrgent) tagHeaderParts.push('🚨 জরুরি');
-  if (tags.length > 0) tagHeaderParts.push(tags.slice(0, 3).join(' '));
-  const tagLine = tagHeaderParts.length > 0 ? `${tagHeaderParts.join(' · ')}\n` : '';
-  const dateLine = cleanDate ? `\n📅 তারিখ: ${cleanDate}` : '';
-
-  return `${tagLine}🔔 নতুন নোটিশ — ${notice.college_name || 'জাতীয় বিশ্ববিদ্যালয় কলেজ'}${dateLine}\n\n📌 ${notice.title}\n🔗 ${notice.link}`;
-}
 
 export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges }) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -131,7 +92,7 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
 
   const handleCopyTelegramMsg = async (notice: Notice) => {
     try {
-      await navigator.clipboard.writeText(buildTelegramFormatPreview(notice));
+      await navigator.clipboard.writeText(buildTelegramNoticePreview(notice));
       setCopiedTelegram(true);
       window.setTimeout(() => setCopiedTelegram(false), 2000);
     } catch {
@@ -392,7 +353,7 @@ export const NoticeHistory: React.FC<NoticeHistoryProps> = ({ notices, colleges 
               </div>
 
               <div className="bg-slate-900 text-slate-100 rounded-xl p-3.5 border border-slate-800 font-sans text-xs leading-relaxed whitespace-pre-wrap break-words shadow-inner">
-                {buildTelegramFormatPreview(activeMessageNotice)}
+                {buildTelegramNoticePreview(activeMessageNotice)}
               </div>
             </div>
 

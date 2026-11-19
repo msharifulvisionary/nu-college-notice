@@ -984,22 +984,22 @@ function classifyNoticeAlertTags(title: string): { isUrgent: boolean; tags: stri
   const tags: string[] = [];
 
   if (lower.includes('ফরম') || lower.includes('ফর্ম') || lower.includes('form')) {
-    tags.push('#ফরম_পূরণ');
+    tags.push('[ফরম পূরণ]');
   }
-  if (lower.includes('রুটিন') || lower.includes('সময়সূচী') || lower.includes('routine') || lower.includes('schedule')) {
-    tags.push('#পরীক্ষার_রুটিন');
+  if (lower.includes('রুটিন') || lower.includes('সময়সূচী') || lower.includes('সময়সূচী') || lower.includes('routine') || lower.includes('schedule')) {
+    tags.push('[পরীক্ষার রুটিন]');
   }
   if (lower.includes('ফলাফল') || lower.includes('ফল') || lower.includes('result')) {
-    tags.push('#ফলাফল');
+    tags.push('[ফলাফল]');
   }
   if (lower.includes('ভর্তি') || lower.includes('admission')) {
-    tags.push('#ভর্তি');
+    tags.push('[ভর্তি]');
   }
   if (lower.includes('স্থগিত') || lower.includes('বাতিল') || lower.includes('postponed')) {
-    tags.push('#স্থগিত');
+    tags.push('[স্থগিত]');
   }
-  if ((lower.includes('পরীক্ষা') || lower.includes('exam')) && !tags.includes('#পরীক্ষার_রুটিন')) {
-    tags.push('#পরীক্ষা');
+  if ((lower.includes('পরীক্ষা') || lower.includes('exam')) && !tags.includes('[পরীক্ষার রুটিন]')) {
+    tags.push('[পরীক্ষা]');
   }
 
   const isUrgent =
@@ -1010,10 +1010,11 @@ function classifyNoticeAlertTags(title: string): { isUrgent: boolean; tags: stri
     lower.includes('বাতিল') ||
     lower.includes('সংশোধিত') ||
     lower.includes('সময় বৃদ্ধি') ||
+    lower.includes('সময় বৃদ্ধি') ||
     lower.includes('বর্ধিত') ||
-    tags.includes('#ফরম_পূরণ') ||
-    tags.includes('#পরীক্ষার_রুটিন') ||
-    tags.includes('#ফলাফল');
+    tags.includes('[ফরম পূরণ]') ||
+    tags.includes('[পরীক্ষার রুটিন]') ||
+    tags.includes('[ফলাফল]');
 
   return { isUrgent, tags: tags.slice(0, 3) };
 }
@@ -1024,10 +1025,15 @@ function formatTelegramMessage(
   deadlineIso?: string | null
 ): string {
   const { isUrgent, tags } = classifyNoticeAlertTags(notice.title);
-  const tagHeaderParts: string[] = [];
-  if (isUrgent) tagHeaderParts.push('🚨 জরুরি');
-  if (tags.length > 0) tagHeaderParts.push(tags.join(' '));
-  const tagLine = tagHeaderParts.length > 0 ? `${tagHeaderParts.join(' · ')}\n` : '';
+  const tagText = tags.join(' ');
+  let tagLine = '';
+  if (isUrgent && tagText) {
+    tagLine = `🚨 জরুরি · ${tagText}\n`;
+  } else if (isUrgent) {
+    tagLine = '🚨 জরুরি\n';
+  } else if (tagText) {
+    tagLine = `🏷️ ${tagText}\n`;
+  }
 
   const dateLine = notice.date ? `\n📅 তারিখ: ${notice.date}` : '';
   const deadlineLine = deadlineIso ? `\n⏳ শেষ তারিখ: ${deadlineIso}` : '';
